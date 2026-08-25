@@ -240,8 +240,16 @@ prose conventions.
 
 - After any correction from the human, add the pattern to
   `memory/gotchas.md`.
+- Each entry needs a `**Rule**:` line saying what to do differently next
+  time. An error log without one is a note, not a correction. The `Stop`
+  hook scans added lines in `memory/gotchas.md` for that literal marker
+  and blocks without it. `.githooks/pre-commit` checks the same thing,
+  but only in repos where `core.hooksPath` points at `.githooks`.
+- Evidence and a verification step make the rule checkable later. Not
+  enforced, but a rule you cannot re-test is a guess.
 - If a fix fails twice, stop and re-read the relevant code top-down.
-  State what assumption was wrong before trying again.
+  Check upstream docs or vendored source before guessing again. State
+  what assumption was wrong before trying again.
 - When asked to test your own output, use a new-user path through the
   feature, not just code inspection.
 
@@ -303,3 +311,29 @@ required          = true
 artifacts_dir     = ".agent/visual"
 freshness_seconds = 3600
 ```
+
+---
+
+## 16. Commit Hygiene — AI Authorship
+
+- NEVER add `Co-Authored-By:` trailers with AI or agent names to commits.
+- NEVER version or commit AI agent configuration files, memory files,
+  skill definitions, or visual evidence artifacts.
+- Git history must look as if a human wrote every line.
+
+---
+
+## 17. Token-Filtered Commands (RTK)
+
+- RTK is wired as a Claude Code hook and rewrites Bash commands
+  automatically. Do not prefix commands with `rtk` by hand; the hook
+  already did it.
+- Filters are lossy by design. When command output IS the evidence for a
+  claim — test results, a diff you are about to describe, a log you will
+  call clean — re-run it through `rtk proxy <cmd>` and cite the raw
+  output.
+- Do not copy RTK's command tables into project files. The global
+  `~/.claude/RTK.md` already applies everywhere; per-project copies cost
+  tokens every session to say the same thing.
+- Check real savings with `rtk gain` before trusting any published
+  percentage.
