@@ -12,43 +12,19 @@
 #
 # Hook output contract: exit 0 + JSON block decision on stdout. Earlier
 # versions mixed JSON with exit 2, which Claude silently discarded.
+#
+# The actual staleness check lives in _lib.sh's progress_stale_reason —
+# shared with precompact-state-check.sh (same question, different
+# trigger and JSON shape) and with Codex's stop.sh, which invokes this
+# script directly (see .codex/hooks/stop.sh).
 
 # Read and discard stdin.
 cat > /dev/null
 
-[ -f "memory/progress.md" ] || exit 0
-git rev-parse --is-inside-work-tree &>/dev/null || exit 0
+. "$(dirname "$0")/_lib.sh"
 
-MODIFIED_FILES=$(
-  {
-    git diff --name-only 2>/dev/null
-    git diff --cached --name-only 2>/dev/null
-    # Untracked files too — a brand-new source file still counts as a change
-    git ls-files --others --exclude-standard 2>/dev/null
-  } | sort -u
-)
-
-# Exclusions: tooling, docs, agent scratch state (.agent/), and the
-# directive-alias files that the installer copies from AGENT.md.
-SOURCE_CHANGED=$(
-  echo "$MODIFIED_FILES" \
-    | grep -vE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)' \
-    | grep -v '^$' \
-    | grep -cvE '\.md$'
-)
-SOURCE_CHANGED=${SOURCE_CHANGED:-0}
-
-if [ "$SOURCE_CHANGED" -eq 0 ]; then
-  exit 0
-fi
-
-PROGRESS_CHANGED=$(echo "$MODIFIED_FILES" | grep -c '^memory/progress\.md$')
-PROGRESS_CHANGED=${PROGRESS_CHANGED:-0}
-
-if [ "$PROGRESS_CHANGED" -eq 0 ]; then
-  REASON="State enforcement: ${SOURCE_CHANGED} source file(s) modified but memory/progress.md was not updated. Update progress.md to reflect completed atomic tasks before finishing, or state explicitly why this work did not require progress tracking."
+REASON=$(progress_stale_reason)
+if [ -n "$REASON" ]; then
   jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
-  exit 0
 fi
-
 exit 0

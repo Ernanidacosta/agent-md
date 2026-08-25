@@ -82,6 +82,96 @@ has_npm_test_script() {
   [ -n "$t" ] && [ "$t" != 'echo "Error: no test specified" && exit 1' ]
 }
 
+# progress_stale_reason — prints a human-readable blocking reason when
+# source files changed without memory/progress.md being updated too, or
+# when memory/gotchas.md gained an entry without an explicit **Rule**.
+# Prints nothing when everything's in order (nothing to block on).
+#
+# Shared between the Stop hook (state-enforcement.sh) and the PreCompact
+# hook (precompact-state-check.sh) — same underlying question ("did
+# meaningful work happen without memory being updated"), just triggered
+# at two different moments and reported via two different JSON shapes.
+progress_stale_reason() {
+  [ -f "memory/progress.md" ] || return 0
+  git rev-parse --is-inside-work-tree &>/dev/null || return 0
+
+  local modified_files source_changed progress_changed
+  local gotchas_diff gotchas_changed gotchas_rules
+
+  modified_files=$(
+    {
+      git diff --name-only 2>/dev/null
+      git diff --cached --name-only 2>/dev/null
+      # Untracked files too — a brand-new source file still counts as a change
+      git ls-files --others --exclude-standard 2>/dev/null
+    } | sort -u
+  )
+
+  # Exclusions: tooling, docs, agent scratch state (.agent/), and the
+  # directive-alias files that the installer copies from AGENT.md.
+  source_changed=$(
+    echo "$modified_files" \
+      | grep -vE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)' \
+      | grep -v '^$' \
+      | grep -cvE '\.md$'
+  )
+  source_changed=${source_changed:-0}
+
+  # A correction must become a reusable rule, not merely a historical note.
+  # This only applies when gotchas changed; ordinary source work does not
+  # need a new gotcha entry.
+  gotchas_diff=$( {
+    git diff -- memory/gotchas.md 2>/dev/null
+    git diff --cached -- memory/gotchas.md 2>/dev/null
+  } )
+  gotchas_changed=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+[^+]' || true)
+  gotchas_rules=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+.*\*\*Rule\*\*:' || true)
+
+  if [ "$gotchas_changed" -gt 0 ] && [ "$gotchas_rules" -eq 0 ]; then
+    echo "State enforcement: memory/gotchas.md changed without an explicit **Rule**. Convert the recorded failure into a concrete prevention rule before finishing."
+    return 0
+  fi
+
+  [ "$source_changed" -eq 0 ] && return 0
+
+  progress_changed=$(echo "$modified_files" | grep -c '^memory/progress\.md$')
+  progress_changed=${progress_changed:-0}
+
+  # Repos may gitignore memory/ (e.g. a global ~/.gitignore excluding it).
+  # git diff/ls-files never sees those edits, so progress_changed would be
+  # stuck at 0 forever once any source file changes. Fall back to mtime:
+  # a progress.md newer than every modified source file counts as updated.
+  if [ "$progress_changed" -eq 0 ] && git check-ignore -q memory/progress.md 2>/dev/null; then
+    local progress_mtime newest_source_mtime file file_mtime
+    progress_mtime=$(stat_mtime memory/progress.md)
+    progress_mtime=${progress_mtime:-0}
+    newest_source_mtime=0
+    while IFS= read -r file; do
+      [ -z "$file" ] && continue
+      [ -e "$file" ] || continue
+      if echo "$file" \
+        | grep -qE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)'; then
+        continue
+      fi
+      echo "$file" | grep -qE '\.md$' && continue
+      file_mtime=$(stat_mtime "$file")
+      file_mtime=${file_mtime:-0}
+      if [ "$file_mtime" -gt "$newest_source_mtime" ]; then
+        newest_source_mtime=$file_mtime
+      fi
+    done <<EOF
+$modified_files
+EOF
+    if [ "$progress_mtime" -ge "$newest_source_mtime" ]; then
+      progress_changed=1
+    fi
+  fi
+
+  if [ "$progress_changed" -eq 0 ]; then
+    echo "State enforcement: ${source_changed} source file(s) modified but memory/progress.md was not updated. Update progress.md to reflect completed atomic tasks before finishing, or state explicitly why this work did not require progress tracking."
+  fi
+}
+
 # visual_evidence_ok <artifacts_dir> <freshness_seconds>
 # Returns 0 when there's at least one fresh, non-empty markdown evidence
 # file in <artifacts_dir> that mentions the filename of at least one
