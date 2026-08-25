@@ -160,6 +160,19 @@ if [ -f "memory/progress.md" ]; then
   fi
 fi
 
+# --- Learning enforcement (memory/gotchas.md) ---
+# When a correction is recorded, it must include a prevention rule.
+GOTCHAS_STAGED=$(git diff --cached -- memory/gotchas.md)
+GOTCHAS_CHANGED=$(printf '%s\n' "$GOTCHAS_STAGED" | grep -cE '^\+[^+]' || true)
+GOTCHAS_RULES=$(printf '%s\n' "$GOTCHAS_STAGED" | grep -cE '^\+.*\*\*Rule\*\*:' || true)
+
+if [ "$GOTCHAS_CHANGED" -gt 0 ] && [ "$GOTCHAS_RULES" -eq 0 ]; then
+  err "memory/gotchas.md changed without an explicit **Rule**"
+  FAIL=1
+else
+  ok "recorded corrections include prevention rules"
+fi
+
 echo ""
 if [ "$FAIL" -eq 1 ]; then
   err "Pre-commit BLOCKED. Fix errors above, re-stage, and retry."
