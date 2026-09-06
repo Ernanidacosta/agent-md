@@ -18,6 +18,14 @@ have git || bad "git is not installed"
 have jq || bad "jq is not installed; hooks need it for JSON parsing"
 have bash || bad "bash is not installed"
 
+SHARED_LIB=.claude/hooks/_lib.sh
+if [ -f "$SHARED_LIB" ]; then
+  # shellcheck source=.claude/hooks/_lib.sh
+  . "$SHARED_LIB"
+else
+  bad "shared policy library missing: $SHARED_LIB"
+fi
+
 if [ -f AGENT.md ]; then
   ok "AGENT.md exists"
 else
@@ -46,12 +54,61 @@ fi
 if [ -d .agent-md/bin ]; then ok "agent-md helpers present"; else warn ".agent-md/bin missing"; fi
 if [ -d memory ]; then ok "memory directory present"; else warn "memory directory missing"; fi
 
+if [ -f "$SHARED_LIB" ]; then
+  CONTRACT=$(verification_contract_json "$(toml_path)")
+  printf 'Verification:\n'
+  if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" != true ]; then
+    bad "$(policy_human_message "$(printf '%s' "$CONTRACT" | jq -c '.error')")"
+  else
+    printf '  %-12s %-10s %-15s %s\n' check policy origin availability
+    while IFS= read -r SPEC; do
+      [ -n "$SPEC" ] || continue
+      CHECK_NAME=$(printf '%s' "$SPEC" | jq -r '.name')
+      REQUIREMENT=$(printf '%s' "$SPEC" | jq -r '.requirement')
+      ORIGIN=$(printf '%s' "$SPEC" | jq -r '.origin')
+      COMMAND=$(printf '%s' "$SPEC" | jq -r '.command')
+      AVAILABILITY="not configured"
+      if [ "$ORIGIN" != "not configured" ]; then
+        if verification_command_preflight "$COMMAND"; then
+          AVAILABILITY="available"
+        else
+          PREFLIGHT_STATUS=$?
+          case "$PREFLIGHT_STATUS" in
+            1) AVAILABILITY="unavailable" ;;
+            2) AVAILABILITY="not preflighted" ;;
+            *) AVAILABILITY="invalid" ;;
+          esac
+        fi
+      fi
+      printf '  %-12s %-10s %-15s %s\n' \
+        "$CHECK_NAME" "$REQUIREMENT" "$ORIGIN" "$AVAILABILITY"
+      if [ "$REQUIREMENT" = required ] && [ "$ORIGIN" = "not configured" ]; then
+        bad "[ERROR VERIFY_UNAVAILABLE] Required check '$CHECK_NAME' has no command. Recovery: configure verify.$CHECK_NAME."
+      elif [ "$AVAILABILITY" = unavailable ] || [ "$AVAILABILITY" = invalid ]; then
+        if [ "$REQUIREMENT" = required ]; then
+          bad "[ERROR VERIFY_UNAVAILABLE] Required check '$CHECK_NAME' is $AVAILABILITY. Recovery: fix or install its command."
+        else
+          warn "[WARNING VERIFY_UNAVAILABLE] Optional check '$CHECK_NAME' is $AVAILABILITY."
+        fi
+      fi
+    done < <(printf '%s' "$CONTRACT" | jq -c '.checks[]')
+    TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // empty')
+    if [ -n "$TIMEOUT" ]; then
+      if have timeout || have gtimeout; then
+        ok "verification timeout is ${TIMEOUT}s"
+      else
+        bad "[ERROR VERIFY_UNAVAILABLE] timeout is configured but timeout/gtimeout is unavailable"
+      fi
+    else
+      warn "verification timeout is not configured; host limits remain the only bound"
+    fi
+  fi
+fi
+
 # ICM is an optional semantic/historical memory provider. Detection is
 # deliberately read-only: doctor never starts it or calls its daemon/API.
 ICM_ENABLED=""
-if [ -f .claude/hooks/_lib.sh ]; then
-  # shellcheck source=.claude/hooks/_lib.sh
-  . .claude/hooks/_lib.sh
+if [ -f "$SHARED_LIB" ]; then
   ICM_ENABLED=$(read_toml "$(toml_path)" integrations.icm enabled)
 fi
 

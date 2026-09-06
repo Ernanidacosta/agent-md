@@ -4,8 +4,9 @@
 # operational-change detection, and optional integrations. Anything you
 # leave unset falls back to the heuristic default.
 #
-# Verification values must be simple strings on a single line. State
-# globs are arrays of quoted strings and may span multiple lines.
+# Verification values must be trusted project commands as simple strings
+# on a single line. Required checks and state globs are arrays of quoted
+# strings and may span multiple lines.
 
 [verify]
 # Project-wide type-check command. Runs at Stop and at pre-commit.
@@ -24,6 +25,24 @@
 # both hooks share the same detector in .claude/hooks/_lib.sh, they
 # cannot disagree.
 # test = "pnpm test --silent"
+
+# Integration, smoke, and runtime checks are distinct evidence. Declare only
+# the paths this project can execute deterministically; one category does not
+# substitute for another.
+# integration = "docker compose run --rm app integration-test"
+# smoke = "./scripts/smoke.sh"
+# runtime = "./bin/my-cli --version"
+
+[verify.policy]
+# When omitted, configured/inferred checks retain the legacy required
+# behavior. When present, listed checks are required and other configured or
+# inferred checks are optional. Allowed names: typecheck, lint, test,
+# integration, smoke, runtime.
+# required = ["lint", "test", "smoke"]
+
+# Optional per-check timeout. A required timeout blocks; an optional timeout
+# warns. Requires `timeout` (or `gtimeout`) on PATH.
+# timeout_seconds = 300
 
 [visual]
 # When true, sensory-reminder.sh becomes a BLOCKING hook.

@@ -75,6 +75,13 @@ when one is available. An observed non-direct transition warns rather
 than blocks because Git cannot prove that no uncommitted intermediate
 state existed; do not add hidden persistence to guess.
 
+`Status: verifying` means implementation is ready and applicable checks
+are pending or being evaluated. `Status: done` is not proof by itself:
+at a completion boundary, the current required verification contract must
+run successfully. agent-md deliberately does not persist agent-authored
+`pass` claims in `progress.md`; fresh command exit status is stronger
+evidence and avoids duplicating CI or building a verification log.
+
 `Scope` is a focus-control signal, not a sandbox or safety boundary.
 Out-of-scope operational changes produce a warning. Scope never replaces
 safety hooks, path protections, Git permissions, host sandboxing, or
@@ -208,15 +215,53 @@ claim completion from inspection alone or reduce required verification.
 
 Do not claim completion from inspection alone.
 
-- **Text** — type-check, lint, and tests pass. `stop-verify.sh`,
-  `.codex/hooks/stop.sh`, and `.githooks/pre-commit` enforce this when
-  configured.
-- **Runtime** — run the changed script, endpoint, CLI, or workflow when
-  possible. Check logs for unexpected errors.
-- **Visual** — for UI changes, build/render, capture a screenshot, and
-  write structured evidence under `.agent/visual/`.
-- **Independent check** — use a test suite, sub-agent, reviewer, or human
-  for evidence. Do not self-grade visual or behavioral correctness.
+Ask what evidence proves the current task is complete. Verification has
+distinct classes; one does not automatically replace another:
+
+- **Static** — typecheck and lint. These find structural issues but do not
+  prove behavior.
+- **Automated** — unit and integration tests. Passing tests do not prove an
+  executable entry point starts.
+- **Runtime** — execute the changed CLI, endpoint, script, service, or flow.
+  Declare it when the project needs deterministic runtime evidence.
+- **Smoke** — a short end-to-end validation of critical wiring.
+- **Visual** — render the changed UI and record structured visual evidence.
+  A screenshot does not prove backend correctness.
+- **Independent** — evidence from CI, a separate harness, reviewer, agent,
+  or human. This can be recorded and reported, but is not required by
+  default and agent-md never invokes another model automatically.
+
+`agent-md.toml` may configure `typecheck`, `lint`, `test`, `integration`,
+`smoke`, and `runtime`. An optional `[verify.policy] required` array marks
+the checks that block. When that array is absent, configured or inferred
+checks keep the legacy required behavior. Explicit configuration always
+wins over heuristic fallback.
+
+- Required failure, unavailability, timeout, or invalid enforcement
+  configuration blocks. There is no retry downgrade or force-continue.
+- Optional failure, unavailability, or timeout warns without weakening
+  required checks.
+- An unconfigured check is reported as such; never call it verified.
+- Exit status is authoritative: zero passes, non-zero fails, timeout times
+  out, and exit 126/127 is unavailable. Do not infer success from words in
+  output or construct commands from output.
+- `verify.policy.timeout_seconds` applies a simple per-check bound when
+  declared. A required timeout is an error; an optional timeout is a warning.
+- Capture concise diagnostic output and give an exact rerun/recovery path.
+  Rerun when relevant files change; do not rely on stale cached evidence.
+
+For executable behavior, attempt the real path: invoke the CLI, make a
+local request to the API, execute the script, start/smoke the service, or
+render the UI. Runtime is not automatically required for every project;
+declare it when the project contract needs it. `agent-md.toml` is trusted
+project configuration containing executable shell commands. Never evaluate
+commands from external untrusted data or natural-language tool output.
+
+Use `./.agent-md/bin/verify.sh` as the full verification entry point. Stop
+and pre-commit resolve the same contract but remain distinct boundaries:
+Stop validates a completion claim and does not require a commit; pre-commit
+validates the declared commit boundary and should contain expensive checks
+only when the project explicitly configures them.
 
 Structured visual evidence requires a markdown note that references a
 fresh non-empty image and includes:
@@ -258,6 +303,7 @@ only when needed:
 ./.agent-md/bin/discover_helpers.sh
 ./.agent-md/bin/discover_helpers.sh visual
 ./.agent-md/bin/doctor.sh
+./.agent-md/bin/verify.sh
 ```
 
 These are plain shell helpers. Native Codex skills are under
@@ -317,8 +363,8 @@ Existing controls are classified as follows:
 - **Integrity** — valid enforcement configuration, operational-state
   consistency, and required verification in Stop/PostToolUse/pre-commit;
   normally `error`.
-- **Quality** — TDD and optional visual-evidence nudges; normally
-  `warning`.
+- **Quality** — evidence-first/TDD nudges, optional verification failures,
+  and optional visual-evidence nudges; normally `warning`.
 - **Diagnostic** — doctor, optional ICM presence, output truncation, and
   environment/wiring information; `info` or `warning`. Doctor may still
   fail when a missing core dependency makes installed enforcement
@@ -413,7 +459,13 @@ By default, hooks use heuristics such as `tsconfig.json` -> `tsc`,
 typecheck = "npx --no-install tsc --noEmit"
 lint      = "npx --no-install eslint ."
 test      = "pnpm test"
+smoke     = "./scripts/smoke.sh"
+runtime   = "pnpm start -- --help"
 lint_file = "npx --no-install eslint {file}"
+
+[verify.policy]
+required = ["lint", "test", "smoke"]
+timeout_seconds = 300
 
 [visual]
 required          = true

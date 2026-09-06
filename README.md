@@ -51,6 +51,7 @@ your-project/
       discover_helpers.sh
       doctor.sh
       playwright-capture.sh
+      verify.sh
 
   memory/
     agents.md
@@ -147,7 +148,11 @@ Stable codes currently emitted by controls are deliberately limited:
 | `STATE_GOTCHA_RULE_MISSING` | Integrity | `error` |
 | `STATE_GOTCHA_INVALID` | Integrity | `error` |
 | `VERIFY_REQUIRED_FAILED` | Integrity | `error` |
+| `VERIFY_OPTIONAL_FAILED` | Quality | `warning` |
+| `VERIFY_UNAVAILABLE` | Integrity or Quality | `error` when required; otherwise `warning` |
+| `VERIFY_TIMEOUT` | Integrity or Quality | `error` when required; otherwise `warning` |
 | `VERIFY_NOT_CONFIGURED` | Diagnostic | `warning` |
+| `VERIFY_PASSED` | Diagnostic evidence | `info` |
 | `QUALITY_OUT_OF_SCOPE_CHANGE` | Quality | `warning` |
 | `QUALITY_TDD_COVERAGE_RECOMMENDED` | Quality | `warning` |
 | `QUALITY_VISUAL_EVIDENCE_RECOMMENDED` | Quality | `warning` |
@@ -187,7 +192,8 @@ file.
 | Check | Class / severity | Claude Code | Codex | Cursor / Windsurf / Other |
 |---|---|---|---|---|
 | Bash safety | Safety / `fatal` | Hard block via `.claude/hooks/block-destructive.sh` | Hard block via `.codex/hooks/pre-tool-use.sh` | Not covered |
-| Type-check/lint/tests at finish | Integrity / `error` | Hard block via `stop-verify.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
+| Required verification at finish | Integrity / `error` | Hard block via `stop-verify.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
+| Optional verification failure | Quality / `warning` | Advisory via `stop-verify.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
 | Operational state valid and updated | Integrity / `error` | Hard block via `state-enforcement.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
 | Operational change outside task Scope | Quality / `warning` | Advisory via `state-enforcement.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
 | UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or configured hard block | Same through Codex Stop wrapper | Advisory through rules |
@@ -232,8 +238,12 @@ remain explicit options.
 
 ## Deterministic Verification
 
-Heuristics are useful, but explicit commands are better. Copy the example
-config and declare your project checks:
+The completion question is: **what evidence proves this task is complete?**
+agent-md resolves one verification contract for Claude Stop, Codex Stop,
+pre-commit, doctor, and `agent-md-verify`. Explicit commands take precedence;
+heuristics remain a labeled fallback.
+
+Copy the example config and declare project checks:
 
 ```bash
 cp agent-md.toml.example agent-md.toml
@@ -244,7 +254,14 @@ cp agent-md.toml.example agent-md.toml
 typecheck = "npx --no-install tsc --noEmit"
 lint      = "npx --no-install eslint ."
 test      = "pnpm test"
+integration = "pnpm test:integration"
+smoke       = "./scripts/smoke.sh"
+runtime     = "node dist/cli.js --version"
 lint_file = "npx --no-install eslint {file}"
+
+[verify.policy]
+required = ["lint", "test", "smoke"]
+timeout_seconds = 300
 
 [visual]
 required          = true
@@ -255,8 +272,72 @@ freshness_seconds = 3600
 enabled = true
 ```
 
-When no checks are detected, hooks allow completion but warn that the
-work is unverified.
+Supported completion checks are `typecheck`, `lint`, `test`, `integration`,
+`smoke`, and `runtime`. `lint_file` remains the fast PostToolUse check and is
+not part of the completion contract.
+
+When `[verify.policy].required` exists, listed checks are required and all
+other configured or inferred checks are optional. A listed check with no
+configured or inferred command is unavailable and blocks. When the array is
+absent, every configured or inferred check preserves legacy required
+behavior. This makes existing configurations compatible while allowing new
+projects to mark optional diagnostics explicitly. An empty `required = []`
+is valid.
+
+| Result | Required | Optional |
+|---|---|---|
+| exit `0` | pass | pass |
+| exit non-zero | `VERIFY_REQUIRED_FAILED`, blocks | `VERIFY_OPTIONAL_FAILED`, warns |
+| exit `126`/`127` or no required command | `VERIFY_UNAVAILABLE`, blocks | `VERIFY_UNAVAILABLE`, warns |
+| configured timeout exceeded | `VERIFY_TIMEOUT`, blocks | `VERIFY_TIMEOUT`, warns |
+
+Exit status is the primary evidence. Output containing `PASS` cannot rescue
+exit 1, and output containing `FAIL` does not override exit 0. Output is
+captured only for concise diagnosis and is never evaluated as a command.
+`agent-md.toml` is trusted project configuration containing executable shell
+commands; do not populate it from untrusted external or natural-language
+output.
+
+`timeout_seconds` is a simple per-check bound and requires `timeout` or
+`gtimeout`. If the utility is unavailable, a required bounded check fails
+closed and an optional one warns. If no timeout is declared, agent-md reports
+that host limits are the only bound; it does not invent a scheduler.
+
+Verification evidence has distinct classes:
+
+- **static** — typecheck and lint;
+- **automated** — unit and integration tests;
+- **runtime** — the changed CLI, endpoint, service, script, or flow runs;
+- **smoke** — a short end-to-end wiring check;
+- **visual** — fresh structured UI evidence when applicable;
+- **independent** — CI, another reviewer/agent, a human, or separate harness.
+
+One category does not automatically prove another: lint is not behavior,
+tests do not prove a CLI starts, and a screenshot does not prove backend
+correctness. Independent verification is representable in the handoff but
+is not required by default and never launches another model or orchestrator.
+
+Run the complete declared contract with:
+
+```bash
+./.agent-md/bin/verify.sh
+```
+
+The helper first prints every check, requirement, origin, and command, then
+reports name, status, exit code, command, summarized evidence, and recovery.
+It exits non-zero only for invalid configuration or blocking required
+results. Optional failures remain visible warnings. Results are fresh; this
+phase adds no cache.
+
+`doctor.sh` validates contract configuration and wiring without executing
+the suite. It distinguishes `configured`, `inferred`, and `not configured`
+checks, reports required/optional policy and obvious command availability,
+and diagnoses timeout support. Complex shell commands may be labeled “not
+preflighted”; the real runner remains authoritative.
+
+When no checks are configured or inferred, hooks allow completion but emit
+`VERIFY_NOT_CONFIGURED`: the work is explicitly unverified, never silently
+treated as verified.
 
 ## Operational State Enforcement
 
@@ -303,6 +384,12 @@ Next/Blockers content, and no more than five recent completions. A task
 is required for `active`, `blocked`, and `verifying`. Malformed progress
 blocks when it is itself changed or when relevant source changes depend
 on it; an absent progress file preserves the existing opt-out behavior.
+
+`verifying` means implementation is ready while applicable checks are still
+pending or being evaluated. `done` is a completion claim, not evidence:
+Stop/pre-commit/`verify.sh` execute the current required contract freshly.
+agent-md does not persist agent-authored `pass` lines in `progress.md`, which
+would duplicate CI and could not prove that a command actually ran.
 
 The installer still never overwrites an existing `memory/progress.md`.
 A legacy file without this structure remains untouched, but the next
@@ -434,7 +521,9 @@ Observed result: layout renders without overlap at desktop width.
 
 The strict visual hook requires a fresh non-empty markdown file that
 references a fresh non-empty image by filename and includes the required
-fields.
+fields. `visual.required = true` remains fail-closed. Optional evidence only
+warns, and visual evidence never substitutes for required static, automated,
+runtime, or smoke checks.
 
 ## Operational Memory
 
@@ -479,6 +568,7 @@ Discover helpers:
 ```bash
 ./.agent-md/bin/discover_helpers.sh
 ./.agent-md/bin/doctor.sh
+./.agent-md/bin/verify.sh
 ```
 
 Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
@@ -505,6 +595,14 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - Transition validation can compare only states captured by Git or its
   index. Uncaptured intermediate edits are not factual history and cannot
   be reconstructed without adding persistence, which this phase avoids.
+- Command availability preflight is intentionally conservative. Doctor can
+  prove a simple executable is present but may label compound shell commands
+  “not preflighted”; actual exit status remains authoritative.
+- Per-check timeout depends on the portable environment providing `timeout`
+  or `gtimeout`. Without an explicit timeout, only host/process limits apply.
+- “Independent” is a documented evidence class, not orchestration. Risk-based
+  requirements, reviewer selection, and automatic independent execution are
+  deferred to the future Risk Model.
 
 ## Development
 

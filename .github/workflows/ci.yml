@@ -68,6 +68,7 @@ jobs:
           test -f .agent-md/bin/discover_helpers.sh
           test -f .agent-md/bin/doctor.sh
           test -f .agent-md/bin/playwright-capture.sh
+          test -f .agent-md/bin/verify.sh
           test -f .githooks/pre-commit
           test -f memory/progress.md
           grep -q '^\.agent/$' .gitignore

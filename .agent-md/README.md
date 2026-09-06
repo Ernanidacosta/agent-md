@@ -12,12 +12,14 @@ under `.agent-md/templates/memory/`. A target repository's root
     ./.agent-md/bin/discover_helpers.sh          # list helpers
     ./.agent-md/bin/discover_helpers.sh visual   # search helpers
     ./.agent-md/bin/doctor.sh                    # check install wiring
+    ./.agent-md/bin/verify.sh                    # run verification contract
     ./.agent-md/bin/playwright-capture.sh <url>  # capture UI evidence
 
 ## Bundled Helpers
 
 - `discover_helpers.sh` — lists/searches local helper scripts
 - `doctor.sh` — checks common install wiring problems
+- `verify.sh` — displays and executes the required/optional verification contract
 - `playwright-capture.sh` — headless browser screenshot for UI validation
 
 ## Adding a Helper

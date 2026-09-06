@@ -6,13 +6,12 @@
 # Activate: git config core.hooksPath .githooks
 # Bypass (NOT recommended): git commit --no-verify
 #
-# Runs the same verification stack as Claude Code's stop-verify hook,
-# plus the state-enforcement check against memory/progress.md. Package
-# manager / test command detection is shared via .claude/hooks/_lib.sh
-# when present so Stop and pre-commit cannot disagree.
+# Runs the same verification contract as Claude Code's stop-verify hook,
+# plus the state-enforcement check against memory/progress.md.
 #
 # Configuration:
-#   agent-md.toml [verify] typecheck / lint / test override heuristics.
+#   agent-md.toml [verify] commands override heuristics. [verify.policy]
+#   can declare required checks and a per-check timeout.
 
 set -u
 
@@ -40,124 +39,33 @@ policy_message() {
 log "agent-md pre-commit verification"
 
 # --- Shared helpers ---
-# Prefer the Claude-hook library so Stop + pre-commit stay in lockstep.
-# Fall back to inlined copies of the two helpers we need.
+# Prefer the host-neutral library so Stop + pre-commit stay in lockstep.
 if [ -f ".claude/hooks/_lib.sh" ]; then
   # shellcheck source=.claude/hooks/_lib.sh
   . ".claude/hooks/_lib.sh"
   SHARED_STATE_AVAILABLE=1
 else
   SHARED_STATE_AVAILABLE=0
-  read_toml() {
-    local file="$1" section="$2" key="$3"
-    [ -f "$file" ] || return 0
-    awk -v section="$section" -v key="$key" '
-      BEGIN { in_sec = 0 }
-      /^[[:space:]]*#/ { next }
-      /^[[:space:]]*\[/ {
-        sec = $0
-        sub(/^[[:space:]]*\[/, "", sec); sub(/\][[:space:]]*$/, "", sec)
-        gsub(/[[:space:]]/, "", sec)
-        in_sec = (sec == section) ? 1 : 0
-        next
-      }
-      in_sec && index($0, "=") > 0 {
-        k = substr($0, 1, index($0, "=") - 1)
-        v = substr($0, index($0, "=") + 1)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
-        sub(/[[:space:]]*#.*$/, "", v)
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-        if (k == key) {
-          if (v ~ /^".*"$/)      { gsub(/^"|"$/, "", v) }
-          else if (v ~ /^'\''.*'\''$/) { gsub(/^'\''|'\''$/, "", v) }
-          print v
-          exit
-        }
-      }
-    ' "$file"
-  }
-  npm_test_cmd() {
-    if   [ -f "pnpm-lock.yaml" ];                       then echo "pnpm test --silent"
-    elif [ -f "yarn.lock" ];                            then echo "yarn test --silent"
-    elif [ -f "bun.lockb" ] || [ -f "bun.lock" ];       then echo "bun test"
-    elif [ -f "package-lock.json" ] || [ -f "package.json" ]; then echo "npm test --silent"
+fi
+
+if [ "$SHARED_STATE_AVAILABLE" -eq 1 ]; then
+  TOML=$(toml_path)
+  VERIFY_SUMMARY=$(run_verification_contract "$TOML")
+  VERIFY_STATUS=$(printf '%s' "$VERIFY_SUMMARY" | jq -r '.status')
+  CHECKS=$(printf '%s' "$VERIFY_SUMMARY" | jq '[.results[] | select(.check != "contract")] | length')
+  while IFS= read -r VERIFY_RESULT; do
+    [ -n "$VERIFY_RESULT" ] || continue
+    RESULT_STATUS=$(printf '%s' "$VERIFY_RESULT" | jq -r '.status')
+    RESULT_CHECK=$(printf '%s' "$VERIFY_RESULT" | jq -r '.check // "verification"')
+    if [ "$RESULT_STATUS" = pass ]; then
+      ok "$RESULT_CHECK"
+    elif [ "$RESULT_STATUS" = warn ]; then
+      log "$(verification_result_human "$VERIFY_RESULT")"
+    else
+      err "$(verification_result_human "$VERIFY_RESULT")"
     fi
-  }
-  has_npm_test_script() {
-    [ -f "package.json" ] || return 1
-    local t
-    t=$(jq -r '.scripts.test // empty' package.json 2>/dev/null)
-    [ -n "$t" ] && [ "$t" != 'echo "Error: no test specified" && exit 1' ]
-  }
-fi
-
-TOML="${AGENT_MD_TOML:-agent-md.toml}"
-CFG_TYPECHECK=$(read_toml "$TOML" verify typecheck)
-CFG_LINT=$(read_toml "$TOML" verify lint)
-CFG_TEST=$(read_toml "$TOML" verify test)
-
-run_check() {
-  local label="$1" cmd="$2"
-  [ -n "$cmd" ] || return 0
-  CHECKS=$((CHECKS + 1))
-  if eval "$cmd"; then
-    ok "$label"
-  else
-    err "$(policy_message \
-      error VERIFY_REQUIRED_FAILED \
-      "Required verification failed: ${label}." \
-      "Fix the reported check, re-stage, and retry.")"
-    FAIL=1
-  fi
-}
-
-# --- Typecheck ---
-if [ -n "$CFG_TYPECHECK" ]; then
-  run_check "$CFG_TYPECHECK" "$CFG_TYPECHECK"
-elif [ -f "tsconfig.json" ]; then
-  run_check "tsc --noEmit" "npx --no-install tsc --noEmit"
-fi
-
-# --- Lint ---
-if [ -n "$CFG_LINT" ]; then
-  run_check "$CFG_LINT" "$CFG_LINT"
-elif compgen -G ".eslintrc*" > /dev/null || compgen -G "eslint.config.*" > /dev/null; then
-  run_check "eslint" "npx --no-install eslint ."
-fi
-
-# --- Python ruff (when no explicit lint override) ---
-if [ -z "$CFG_LINT" ] && command -v ruff &>/dev/null; then
-  HAS_PY=$(git diff --cached --name-only | grep -c '\.py$' || true)
-  if [ "${HAS_PY:-0}" -gt 0 ] || compgen -G "*.py" > /dev/null; then
-    run_check "ruff" "ruff check ."
-  fi
-fi
-
-# --- Python mypy ---
-if [ -z "$CFG_TYPECHECK" ] && command -v mypy &>/dev/null \
-   && { [ -f "mypy.ini" ] || grep -q '\[tool.mypy\]' pyproject.toml 2>/dev/null; }; then
-  run_check "mypy" "mypy ."
-fi
-
-# --- Rust ---
-if [ -z "$CFG_TYPECHECK" ] && [ -f "Cargo.toml" ]; then
-  run_check "cargo check" "cargo check"
-fi
-
-# --- Tests ---
-if [ -n "$CFG_TEST" ]; then
-  run_check "$CFG_TEST" "$CFG_TEST"
-else
-  NPM_TEST=$(npm_test_cmd)
-  if [ -n "$NPM_TEST" ] && has_npm_test_script; then
-    run_check "$NPM_TEST" "$NPM_TEST"
-  elif [ -f "pyproject.toml" ] || [ -f "pytest.ini" ]; then
-    if command -v pytest &>/dev/null; then
-      run_check "pytest" "pytest --tb=short -q"
-    fi
-  elif [ -f "Cargo.toml" ]; then
-    run_check "cargo test" "cargo test --quiet"
-  fi
+  done < <(printf '%s' "$VERIFY_SUMMARY" | jq -c '.results[]')
+  [ "$VERIFY_STATUS" != fail ] || FAIL=1
 fi
 
 # --- Operational state enforcement ---
@@ -193,12 +101,14 @@ if [ "$FAIL" -eq 1 ]; then
   exit 1
 fi
 
-if [ "$CHECKS" -eq 0 ]; then
-  log "$(policy_message \
-    warning VERIFY_NOT_CONFIGURED \
-    "No type-checker, linter, or test suite was detected; commit is allowed but unverified." \
-    "Declare commands in agent-md.toml to make verification deterministic.")"
+if [ "$CHECKS" -eq 0 ] && [ "$SHARED_STATE_AVAILABLE" -eq 0 ]; then
+  err "$(policy_message \
+    error CONFIG_INVALID \
+    "The shared verification contract is unavailable." \
+    "Reinstall agent-md before committing.")"
 else
-  ok "All $CHECKS check(s) passed."
+  if [ "$FAIL" -eq 0 ] && [ "$CHECKS" -gt 0 ]; then
+    ok "All required checks passed; $CHECKS configured or inferred check(s) evaluated."
+  fi
 fi
 exit 0

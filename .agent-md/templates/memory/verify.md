@@ -4,13 +4,13 @@ Only current, executable verification criteria belong here.
 
 ## Required Checks
 
-- [ ] Type-check passes when the project has a type-checker.
-- [ ] Lint passes.
-- [ ] Tests pass, including tests for new behavior.
+- [ ] `./.agent-md/bin/verify.sh` passes the required project contract.
+- [ ] Task-specific regression tests cover changed behavior.
 
 ## Runtime Evidence
 
-- [ ] Changed workflows were exercised when applicable.
+- [ ] Changed executable workflows were exercised when applicable or declared
+  as a required `runtime`/`smoke` check in `agent-md.toml`.
 - [ ] Relevant logs contain no unexpected errors.
 
 ## Visual Evidence

@@ -4,6 +4,10 @@
 lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh .githooks/pre-commit install.sh"
 test = "bats tests/"
 
+[verify.policy]
+required = ["lint", "test"]
+timeout_seconds = 300
+
 [state]
 source_globs = [
   ".agent-md/bin/**",

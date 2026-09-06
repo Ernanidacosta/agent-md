@@ -69,6 +69,7 @@ EOF
   [ -x "$TARGET_DIR/.claude/hooks/stop-verify.sh" ]
   [ -x "$TARGET_DIR/.claude/hooks/state-enforcement.sh" ]
   [ -x "$TARGET_DIR/.claude/hooks/sensory-reminder.sh" ]
+  [ -x "$TARGET_DIR/.agent-md/bin/verify.sh" ]
   out=$(cd "$TARGET_DIR" && echo '{"tool_input":{"command":"git reset --hard"}}' | bash .codex/hooks/pre-tool-use.sh)
   echo "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
 }

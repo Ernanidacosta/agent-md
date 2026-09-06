@@ -136,6 +136,32 @@ read_toml_array() {
   ' "$file"
 }
 
+# toml_key_present <file> <section> <key>
+# Distinguishes an absent scalar from a deliberately empty one. The latter
+# matters for executable verification commands: `lint = ""` is invalid,
+# not equivalent to an omitted optional check.
+toml_key_present() {
+  local file="$1" section="$2" key="$3"
+  [ -f "$file" ] || return 1
+  awk -v section="$section" -v key="$key" '
+    BEGIN { in_sec = 0 }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*\[/ {
+      sec = $0
+      sub(/^[[:space:]]*\[/, "", sec); sub(/\][[:space:]]*(#.*)?$/, "", sec)
+      gsub(/[[:space:]]/, "", sec)
+      in_sec = (sec == section)
+      next
+    }
+    in_sec && index($0, "=") > 0 {
+      candidate = substr($0, 1, index($0, "=") - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
+      if (candidate == key) { found = 1; exit }
+    }
+    END { exit (found ? 0 : 1) }
+  ' "$file"
+}
+
 # toml_path — location of the config file (override with AGENT_MD_TOML env)
 toml_path() {
   echo "${AGENT_MD_TOML:-agent-md.toml}"
@@ -220,6 +246,404 @@ has_npm_test_script() {
   local t
   t=$(jq -r '.scripts.test // empty' package.json 2>/dev/null)
   [ -n "$t" ] && [ "$t" != 'echo "Error: no test specified" && exit 1' ]
+}
+
+verification_check_names() {
+  printf '%s\n' typecheck lint test integration smoke runtime
+}
+
+# infer_verification_command <check>
+# Heuristics are deliberately small and observable. Explicit [verify]
+# commands always win. Empty output means no fallback was detected.
+infer_verification_command() {
+  local check="$1" npm_command
+  case "$check" in
+    typecheck)
+      if [ -f tsconfig.json ]; then
+        printf '%s\n' 'npx --no-install tsc --noEmit'
+      elif [ -f mypy.ini ] || grep -q '\[tool.mypy\]' pyproject.toml 2>/dev/null; then
+        printf '%s\n' 'mypy .'
+      elif [ -f Cargo.toml ]; then
+        printf '%s\n' 'cargo check'
+      fi
+      ;;
+    lint)
+      if compgen -G '.eslintrc*' >/dev/null || compgen -G 'eslint.config.*' >/dev/null; then
+        printf '%s\n' 'npx --no-install eslint .'
+      elif [ -f ruff.toml ] || [ -f .ruff.toml ] \
+        || grep -q '\[tool.ruff' pyproject.toml 2>/dev/null; then
+        printf '%s\n' 'ruff check .'
+      fi
+      ;;
+    test)
+      npm_command=$(npm_test_cmd)
+      if [ -n "$npm_command" ] && has_npm_test_script; then
+        printf '%s\n' "$npm_command"
+      elif [ -f pytest.ini ] || grep -q '\[tool.pytest' pyproject.toml 2>/dev/null; then
+        printf '%s\n' 'pytest --tb=short -q'
+      elif [ -f Cargo.toml ]; then
+        printf '%s\n' 'cargo test'
+      fi
+      ;;
+  esac
+}
+
+verification_invalid_contract_json() {
+  local message="$1" suggestion="${2:-Fix agent-md.toml before running verification.}"
+  local result
+  result=$(policy_result_json fail error CONFIG_INVALID "$message" "$suggestion")
+  jq -cn --argjson error "$result" '{valid:false, checks:[], error:$error}'
+}
+
+# verification_contract_json [config]
+# Resolves the complete, deterministic contract without executing checks.
+# The intentionally small schema uses only existing scalar/string-array
+# parser support:
+#   [verify] <check> = "command"
+#   [verify.policy] required = ["lint", "test"]
+#   [verify.policy] timeout_seconds = 300
+# Without `required`, resolved checks retain the legacy required behavior.
+verification_contract_json() {
+  local config="${1:-$(toml_path)}" required_values required_status
+  local required_declared=0 timeout_value="" rows='[]' check command origin requirement
+  local seen_required="" value row
+
+  required_values=$(read_toml_array "$config" verify.policy required)
+  required_status=$?
+  case "$required_status" in
+    0) required_declared=1 ;;
+    1) required_values="" ;;
+    *)
+      verification_invalid_contract_json \
+        "Invalid ${config}: verify.policy.required must be an array of quoted check names."
+      return 0
+      ;;
+  esac
+
+  while IFS= read -r value; do
+    [ -n "$value" ] || continue
+    case "$value" in
+      typecheck|lint|test|integration|smoke|runtime) ;;
+      *)
+        verification_invalid_contract_json \
+          "Invalid ${config}: unknown required verification check '${value}'."
+        return 0
+        ;;
+    esac
+    if printf '%s\n' "$seen_required" | grep -qxF "$value"; then
+      verification_invalid_contract_json \
+        "Invalid ${config}: required verification check '${value}' is duplicated."
+      return 0
+    fi
+    if [ -n "$seen_required" ]; then
+      seen_required="${seen_required}
+${value}"
+    else
+      seen_required="$value"
+    fi
+  done <<EOF
+$required_values
+EOF
+
+  if toml_key_present "$config" verify.policy timeout_seconds; then
+    timeout_value=$(read_toml "$config" verify.policy timeout_seconds)
+    case "$timeout_value" in
+      ''|*[!0-9]*|0)
+        verification_invalid_contract_json \
+          "Invalid ${config}: verify.policy.timeout_seconds must be a positive integer."
+        return 0
+        ;;
+    esac
+  fi
+
+  while IFS= read -r check; do
+    command=""
+    origin="not configured"
+    if toml_key_present "$config" verify "$check"; then
+      command=$(read_toml "$config" verify "$check")
+      if [ -z "$command" ]; then
+        verification_invalid_contract_json \
+          "Invalid ${config}: verify.${check} is configured with an empty command."
+        return 0
+      fi
+      if ! bash -n -c "$command" >/dev/null 2>&1; then
+        verification_invalid_contract_json \
+          "Invalid ${config}: verify.${check} is not valid shell syntax."
+        return 0
+      fi
+      origin="configured"
+    else
+      command=$(infer_verification_command "$check")
+      [ -z "$command" ] || origin="inferred"
+    fi
+
+    if [ "$required_declared" -eq 1 ]; then
+      if printf '%s\n' "$required_values" | grep -qxF "$check"; then
+        requirement="required"
+      else
+        requirement="optional"
+      fi
+    elif [ "$origin" = "not configured" ]; then
+      requirement="optional"
+    else
+      requirement="required"
+    fi
+
+    row=$(jq -cn \
+      --arg name "$check" \
+      --arg requirement "$requirement" \
+      --arg origin "$origin" \
+      --arg command "$command" \
+      '{name:$name, requirement:$requirement, origin:$origin, command:$command}')
+    rows=$(printf '%s' "$rows" | jq -c --argjson row "$row" '. + [$row]')
+  done <<EOF
+$(verification_check_names)
+EOF
+
+  jq -cn \
+    --argjson checks "$rows" \
+    --arg timeout "$timeout_value" \
+    --arg mode "$(if [ "$required_declared" -eq 1 ]; then printf explicit; else printf legacy; fi)" '
+      {
+        valid: true,
+        policy: $mode,
+        timeout_seconds: (if $timeout == "" then null else ($timeout | tonumber) end),
+        checks: $checks
+      }
+    '
+}
+
+# verification_command_preflight <command>
+# Returns 0 for an obviously available direct command, 1 for an obviously
+# unavailable one, 2 when safe static inspection cannot decide, and 3 for
+# invalid shell syntax. It never executes the configured check.
+verification_command_preflight() {
+  local command="$1" first rest
+  bash -n -c "$command" >/dev/null 2>&1 || return 3
+  rest="$command"
+  while :; do
+    first=${rest%%[[:space:]]*}
+    [ "$first" = "$rest" ] && rest="" || rest=${rest#"$first"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    case "$first" in
+      *=*) [ -n "$rest" ] || return 2 ;;
+      ''|'!'|'('|'{') return 2 ;;
+      *) break ;;
+    esac
+  done
+  first=${first#\"}; first=${first%\"}
+  first=${first#\'}; first=${first%\'}
+  # shellcheck disable=SC2016 # case patterns intentionally match literal shell syntax.
+  case "$first" in
+    *'$('*|*'`'*|*'|'*|*'&'*|*';'*|*'<'*|*'>'*) return 2 ;;
+  esac
+  command -v "$first" >/dev/null 2>&1 && return 0
+  [ -x "$first" ] && return 0
+  return 1
+}
+
+verification_result_json() {
+  local status="$1" severity="$2" code="$3" message="$4" suggestion="$5"
+  local check="$6" requirement="$7" origin="$8" command="$9"
+  local exit_code="${10:-}" evidence="${11:-}" truncated="${12:-false}"
+  jq -cn \
+    --arg status "$status" --arg severity "$severity" --arg code "$code" \
+    --arg message "$message" --arg suggestion "$suggestion" \
+    --arg check "$check" --arg requirement "$requirement" \
+    --arg origin "$origin" --arg command "$command" \
+    --arg exit_code "$exit_code" --arg evidence "$evidence" \
+    --argjson truncated "$truncated" '
+      {
+        status:$status, severity:$severity, code:$code,
+        message:$message, suggestion:$suggestion,
+        check:$check, requirement:$requirement, origin:$origin,
+        command:$command, evidence:$evidence, truncated:$truncated
+      } + if $exit_code == "" then {} else {exit_code:($exit_code | tonumber)} end
+    '
+}
+
+run_verification_check() {
+  local spec="$1" timeout_seconds="${2:-}" name requirement origin command
+  local output_file exit_code evidence line_count truncated=false timeout_command="" label
+  local status severity code message suggestion
+  name=$(printf '%s' "$spec" | jq -r '.name')
+  requirement=$(printf '%s' "$spec" | jq -r '.requirement')
+  origin=$(printf '%s' "$spec" | jq -r '.origin')
+  command=$(printf '%s' "$spec" | jq -r '.command')
+  label=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+
+  if [ "$origin" = "not configured" ]; then
+    verification_result_json \
+      "$(if [ "$requirement" = required ]; then printf fail; else printf warn; fi)" \
+      "$(if [ "$requirement" = required ]; then printf error; else printf warning; fi)" \
+      VERIFY_UNAVAILABLE \
+      "$(if [ "$requirement" = required ]; then printf Required; else printf Optional; fi) verification check '${name}' has no configured or inferred command." \
+      "Configure verify.${name} in agent-md.toml and rerun agent-md-verify." \
+      "$name" "$requirement" "$origin" "" "" "No command was resolved."
+    return 0
+  fi
+
+  output_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-verify.XXXXXX") || {
+    verification_result_json fail error VERIFY_UNAVAILABLE \
+      "Verification check '${name}' could not create diagnostic output storage." \
+      "Check temporary-directory permissions and rerun agent-md-verify." \
+      "$name" "$requirement" "$origin" "$command" "" "The check did not run."
+    return 0
+  }
+
+  if [ -n "$timeout_seconds" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout_command=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+      timeout_command=gtimeout
+    else
+      rm -f "$output_file"
+      verification_result_json \
+        "$(if [ "$requirement" = required ]; then printf fail; else printf warn; fi)" \
+        "$(if [ "$requirement" = required ]; then printf error; else printf warning; fi)" \
+        VERIFY_UNAVAILABLE \
+        "Verification check '${name}' requires a timeout utility, but neither timeout nor gtimeout is available." \
+        "Install a compatible timeout utility or remove verify.policy.timeout_seconds, then rerun agent-md-verify." \
+        "$name" "$requirement" "$origin" "$command" "" "The check did not run."
+      return 0
+    fi
+    if "$timeout_command" "${timeout_seconds}s" bash -c "$command" >"$output_file" 2>&1; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+  elif bash -c "$command" >"$output_file" 2>&1; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  line_count=$(wc -l < "$output_file" | tr -d ' ')
+  evidence=$(awk 'NR <= 30' "$output_file")
+  if [ -z "$evidence" ]; then
+    evidence="No output; exit code ${exit_code}."
+  fi
+  if [ "${line_count:-0}" -gt 30 ]; then truncated=true; fi
+  rm -f "$output_file"
+
+  if [ "$exit_code" -eq 0 ]; then
+    status=pass; severity=info; code=VERIFY_PASSED
+    message="Verification check '${name}' (${label}, ${requirement}, ${origin}) passed."
+    suggestion=""
+  elif [ "$exit_code" -eq 124 ]; then
+    code=VERIFY_TIMEOUT
+    message="Verification check '${name}' (${label}, ${requirement}, ${origin}) exceeded ${timeout_seconds} seconds."
+    suggestion="Inspect the hanging check and rerun agent-md-verify."
+    if [ "$requirement" = required ]; then status=fail; severity=error; else status=warn; severity=warning; fi
+  elif [ "$exit_code" -eq 126 ] || [ "$exit_code" -eq 127 ]; then
+    code=VERIFY_UNAVAILABLE
+    message="Verification check '${name}' (${label}, ${requirement}, ${origin}) was not executable."
+    suggestion="Install or correct the command, then rerun agent-md-verify."
+    if [ "$requirement" = required ]; then status=fail; severity=error; else status=warn; severity=warning; fi
+  else
+    if [ "$requirement" = required ]; then
+      status=fail; severity=error; code=VERIFY_REQUIRED_FAILED
+      message="Required verification check '${name}' (${label}, ${origin}) failed."
+    else
+      status=warn; severity=warning; code=VERIFY_OPTIONAL_FAILED
+      message="Optional verification check '${name}' (${label}, ${origin}) failed."
+    fi
+    suggestion="Fix the failing check and rerun agent-md-verify."
+  fi
+
+  verification_result_json "$status" "$severity" "$code" "$message" "$suggestion" \
+    "$name" "$requirement" "$origin" "$command" "$exit_code" "$evidence" "$truncated"
+}
+
+# run_verification_contract [config]
+# Returns one JSON summary. Exit status is intentionally always zero so hook
+# wrappers can translate results without `set -e` surprises; `.status` is the
+# authoritative control signal.
+run_verification_contract() {
+  local config="${1:-$(toml_path)}" contract error_result results_file
+  local spec result timeout_seconds resolved_count=0 results status
+  contract=$(verification_contract_json "$config")
+  if [ "$(printf '%s' "$contract" | jq -r '.valid')" != true ]; then
+    error_result=$(printf '%s' "$contract" | jq -c '.error')
+    jq -cn --argjson contract "$contract" --argjson result "$error_result" \
+      '{status:"fail", contract:$contract, results:[$result]}'
+    return 0
+  fi
+
+  timeout_seconds=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
+  results_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-results.XXXXXX") || {
+    error_result=$(policy_result_json fail error VERIFY_UNAVAILABLE \
+      "Verification could not create result storage." \
+      "Check temporary-directory permissions and rerun agent-md-verify.")
+    jq -cn --argjson contract "$contract" --argjson result "$error_result" \
+      '{status:"fail", contract:$contract, results:[$result]}'
+    return 0
+  }
+
+  while IFS= read -r spec; do
+    [ -n "$spec" ] || continue
+    if [ "$(printf '%s' "$spec" | jq -r '.origin')" != "not configured" ]; then
+      resolved_count=$((resolved_count + 1))
+      result=$(run_verification_check "$spec" "$timeout_seconds")
+      printf '%s\n' "$result" >> "$results_file"
+    elif [ "$(printf '%s' "$spec" | jq -r '.requirement')" = required ]; then
+      result=$(run_verification_check "$spec" "$timeout_seconds")
+      printf '%s\n' "$result" >> "$results_file"
+    fi
+  done < <(printf '%s' "$contract" | jq -c '.checks[]')
+
+  if [ "$resolved_count" -eq 0 ] && [ ! -s "$results_file" ]; then
+    result=$(verification_result_json warn warning VERIFY_NOT_CONFIGURED \
+      "No verification checks were configured or inferred; completion is unverified." \
+      "Declare verification commands in agent-md.toml." \
+      contract optional "not configured" "" "" "No checks ran.")
+    printf '%s\n' "$result" >> "$results_file"
+  fi
+
+  results=$(jq -sc '.' "$results_file")
+  rm -f "$results_file"
+  status=$(printf '%s' "$results" | jq -r '
+    if any(.[]; .status == "fail") then "fail"
+    elif any(.[]; .status == "warn") then "warn"
+    else "pass" end
+  ')
+  jq -cn --arg status "$status" --argjson contract "$contract" --argjson results "$results" \
+    '{status:$status, contract:$contract, results:$results}'
+}
+
+verification_result_human() {
+  local result="$1" base check requirement origin command exit_code evidence truncated
+  base=$(policy_human_message "$result")
+  check=$(printf '%s' "$result" | jq -r '.check // empty')
+  requirement=$(printf '%s' "$result" | jq -r '.requirement // empty')
+  origin=$(printf '%s' "$result" | jq -r '.origin // empty')
+  command=$(printf '%s' "$result" | jq -r '.command // empty')
+  exit_code=$(printf '%s' "$result" | jq -r '.exit_code // empty')
+  evidence=$(printf '%s' "$result" | jq -r '.evidence // empty')
+  truncated=$(printf '%s' "$result" | jq -r '.truncated // false')
+  printf '%s\n' "$base"
+  [ -z "$check" ] || printf 'Check: %s (%s, %s)\n' "$check" "$requirement" "$origin"
+  [ -z "$command" ] || printf 'Command: %s\n' "$command"
+  [ -z "$exit_code" ] || printf 'Exit code: %s\n' "$exit_code"
+  if [ -n "$evidence" ]; then
+    printf 'Evidence:\n%s\n' "$evidence"
+  fi
+  if [ "$truncated" = true ]; then
+    printf 'Evidence truncated to 30 lines; rerun the command above for complete output.\n'
+  fi
+}
+
+verification_summary_human() {
+  local summary="$1" selector="${2:-all}" result
+  while IFS= read -r result; do
+    [ -n "$result" ] || continue
+    verification_result_human "$result"
+    printf '\n'
+  done < <(printf '%s' "$summary" | jq -c --arg selector "$selector" '
+    .results[] |
+    select($selector == "all" or .status == $selector or
+      ($selector == "nonpass" and .status != "pass"))
+  ')
 }
 
 # Defaults intentionally favor executable product/test code. Metadata and
