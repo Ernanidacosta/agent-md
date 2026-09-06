@@ -1,45 +1,29 @@
 # Definition of Done
 
-Every task's verification criteria must pass before it is marked complete
-in `progress.md`. No exceptions.
+## Required Checks
 
-## Text Verification (always required)
+- [x] `bats tests/` — 103/103 passed.
+- [x] ShellCheck passed for all shipped shell scripts.
+- [x] JSON/TOML validation and `git diff --check` passed.
+- [x] `AGENT.md` and `CLAUDE.md` are identical.
+- [x] CI policy grep passed.
 
-- [ ] Type-check passes in strict mode (project's type-checker)
-- [ ] Lint passes (all configured linters, zero warnings)
-- [ ] Tests pass (existing + new tests for new code)
+## Installer Acceptance
 
-## Tactile Verification (when code executes)
-
-- [ ] Code was actually run — not just written. Script ran, endpoint
-  responded, CLI output observed.
-- [ ] Logs checked — no unexpected errors, warnings, or deprecations.
-- [ ] At least one happy path and one edge case exercised manually.
-
-## Visual Verification (UI changes only)
-
-- [ ] Screenshot captured via Playwright (`.agent-md/bin/playwright-capture.sh`)
-- [ ] VLM or human review confirms visual intent matches the spec
-- [ ] No self-grading ("the code looks right") — independent verification
-
-## Independent Verification
-
-- [ ] Not self-graded. One of: sub-agent review, test suite, or the human
-  confirmed.
-
-## Structured Output / Tool Verification
-
-- [ ] Tool arguments and structured outputs were validated before use
-  (required fields, types, enum values, and file paths).
-- [ ] Tool failures used structured error information where available:
-  `status`, `type`, `message`, `suggestion`.
-- [ ] High-risk claims or changes had an adversarial or independent check.
+- [x] All-agent and agent-specific smoke installs passed.
+- [x] Claude and Codex preserve third-party hooks across repeated installs.
+- [x] Codex-only install contains and executes all shared dependencies.
+- [x] Cursor-only pre-commit uses the shared state classifier.
+- [x] Installed memory comes from clean templates.
+- [x] ICM absence remains a non-fatal warning.
 
 ## Task-Specific Criteria
 
-<!--
-Per-slice criteria beyond the universal checks. Add as your plan.md grows.
-
-### Slice 1: <outcome>
-- [ ] <specific criterion>
--->
+- [x] Safety violations emit `fatal` and remain blocking.
+- [x] Required verification/config/state failures emit `error` and remain
+  blocking without retry downgrade.
+- [x] Optional ICM and quality/diagnostic notices remain warnings.
+- [x] Stable codes appear in compatible human-facing hook output.
+- [x] Paths with spaces, dotfiles, and nested package paths classify
+  correctly without changing the shared glob architecture.
+- [x] Normal doctor and configured `agent-md-verify` passed.

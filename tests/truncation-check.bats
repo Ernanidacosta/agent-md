@@ -9,6 +9,10 @@ teardown() { teardown_repo; }
   input='{"tool_name":"Grep","tool_response":"Output too large — truncated to preview"}'
   out=$(run_hook truncation-check.sh "$input")
   echo "$out" | jq -e '.hookSpecificOutput.additionalContext' > /dev/null
+  echo "$out" | jq -e '
+    .hookSpecificOutput.additionalContext |
+    test("WARNING DIAGNOSTIC_OUTPUT_TRUNCATED")
+  ' > /dev/null
 }
 
 @test "silent on normal grep output" {

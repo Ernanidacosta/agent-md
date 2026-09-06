@@ -3,6 +3,10 @@
 These are plain shell helpers installed by agent-md. They are not Codex
 skills. Native Codex skills live under `.agents/skills/<name>/SKILL.md`.
 
+In the agent-md distribution source, clean installation templates live
+under `.agent-md/templates/memory/`. A target repository's root
+`memory/` belongs to that repository and is never used as seed data.
+
 ## Usage
 
     ./.agent-md/bin/discover_helpers.sh          # list helpers
@@ -25,7 +29,9 @@ skills. Native Codex skills live under `.agents/skills/<name>/SKILL.md`.
    to use it, and what it returns.
 4. Prefer stable output over prose dumps. When the helper is consumed by
    an agent or hook, use JSON or clear key-value lines. For failures,
-   include `status`, `type`, `message`, and `suggestion` when practical.
+   include `status`, `severity`, stable `code`, `message`, and
+   `suggestion` when practical. Safety and integrity failures must remain
+   visible and blocking; optional diagnostics remain warnings.
 5. Keep each helper self-contained. No side effects on load, only on
    execution.
 6. Document required dependencies in the header.

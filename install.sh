@@ -9,9 +9,9 @@
 #   ./install.sh --no-githooks /path/to/project     # skip git-hooks fallback
 #   ./install.sh --dry-run .                        # show what would change
 #   ./install.sh --no-overwrite .                   # never replace existing files
-#   ./install.sh --claude-settings=skip .           # default: don't touch existing .claude/settings.json
+#   ./install.sh --claude-settings=merge .          # default: idempotent hook merge
 #   ./install.sh --claude-settings=replace .        # back up + overwrite
-#   ./install.sh --claude-settings=merge .          # merge hook entries into existing settings.json (jq)
+#   ./install.sh --codex-hooks=skip .               # preserve existing .codex/hooks.json unchanged
 #
 # Or via curl (from inside your project dir):
 #   curl -sL https://raw.githubusercontent.com/iamfakeguru/agent-md/main/install.sh | bash
@@ -22,10 +22,9 @@
 #   --agent=all
 #   --no-overwrite OFF — we WILL replace AGENT.md etc., but always back
 #     up the old copy to *.bak first.
-#   --claude-settings=skip — existing .claude/settings.json is left
-#     alone. Users with handcrafted hook wiring don't get clobbered.
-#     Pass --claude-settings=merge to splice our hooks in, or
-#     --claude-settings=replace to back up and overwrite.
+#   Claude and Codex hook configs are merged by default. Third-party
+#     handlers stay in place; agent-md handlers are refreshed without
+#     duplication. Explicit skip and replace modes remain available.
 #   memory/ files are never overwritten (user state).
 #   .githooks/pre-commit is installed but NOT activated on curl|bash.
 #     You get a printed command to activate it manually.
@@ -38,7 +37,8 @@ TARGET=""
 GITHOOKS="ask"
 DRY_RUN=0
 NO_OVERWRITE=0
-CLAUDE_SETTINGS="skip"
+CLAUDE_SETTINGS="merge"
+CODEX_HOOKS="merge"
 
 for ARG in "$@"; do
   case $ARG in
@@ -48,6 +48,7 @@ for ARG in "$@"; do
     --dry-run)     DRY_RUN=1 ;;
     --no-overwrite) NO_OVERWRITE=1 ;;
     --claude-settings=*) CLAUDE_SETTINGS="${ARG#*=}" ;;
+    --codex-hooks=*) CODEX_HOOKS="${ARG#*=}" ;;
     --help|-h)
       sed -n '2,30p' "$0"; exit 0 ;;
     *)
@@ -59,6 +60,11 @@ done
 case "$CLAUDE_SETTINGS" in
   skip|replace|merge) ;;
   *) echo "Error: --claude-settings must be skip|replace|merge (got '$CLAUDE_SETTINGS')"; exit 1 ;;
+esac
+
+case "$CODEX_HOOKS" in
+  skip|replace|merge) ;;
+  *) echo "Error: --codex-hooks must be skip|replace|merge (got '$CODEX_HOOKS')"; exit 1 ;;
 esac
 
 TARGET="${TARGET:-.}"
@@ -165,6 +171,95 @@ copy_with_agent_body() {
   echo "  ✓ $label"
 }
 
+merge_hook_config() {
+  # src, dst, label, mode. In merge mode, command strings identify the
+  # handlers owned by agent-md. Existing copies of those handlers are
+  # refreshed; every other top-level key, event, group, and handler is
+  # preserved byte-for-byte at the JSON-value level.
+  local src="$1" dst="$2" label="$3" mode="$4"
+
+  if [ ! -f "$dst" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "  → would write     $label"
+    else
+      cp "$src" "$dst"
+      echo "  ✓ $label"
+    fi
+    return 0
+  fi
+
+  if [ "$NO_OVERWRITE" -eq 1 ]; then
+    echo "  · skip (exists)    $label"
+    return 0
+  fi
+
+  case "$mode" in
+    skip)
+      echo "  · $label exists — not touched"
+      ;;
+    replace)
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "  → would back up + replace $label"
+      else
+        backup_if_exists "$dst"
+        cp "$src" "$dst"
+        echo "  ✓ $label (replaced, backup kept)"
+      fi
+      ;;
+    merge)
+      if ! command -v jq &>/dev/null; then
+        echo "  ! jq required to merge $label — existing file left unchanged"
+      elif [ "$DRY_RUN" -eq 1 ]; then
+        echo "  → would merge     $label (idempotent, third-party hooks preserved)"
+      else
+        local merged
+        merged=$(mktemp)
+        if jq -s '
+          .[0] as $existing | .[1] as $agent_md |
+
+          def commands($groups):
+            [$groups[]?.hooks[]?.command // empty];
+
+          def remove_owned($groups; $owned):
+            [$groups[]? |
+              . as $group |
+              if ($group | has("hooks")) then
+                ($group.hooks | map(
+                  select((.command // "") as $command |
+                    ($owned | index($command)) == null)
+                )) as $remaining |
+                if ($remaining | length) > 0
+                then $group * {hooks: $remaining}
+                else empty
+                end
+              else $group
+              end
+            ];
+
+          (($existing * ($agent_md | del(.hooks)))) as $result |
+          (((($existing.hooks // {}) | keys) +
+            (($agent_md.hooks // {}) | keys)) | unique) as $events |
+          $result |
+          .hooks = reduce $events[] as $event ({};
+            (commands($agent_md.hooks[$event] // [])) as $owned |
+            .[$event] = (
+              remove_owned($existing.hooks[$event] // []; $owned) +
+              ($agent_md.hooks[$event] // [])
+            )
+          )
+        ' "$dst" "$src" > "$merged" 2>/dev/null; then
+          backup_if_exists "$dst"
+          mv "$merged" "$dst"
+          echo "  ✓ $label (merged; third-party hooks preserved)"
+        else
+          rm -f "$merged"
+          echo "  ! merge failed for $label — existing file left unchanged"
+        fi
+      fi
+      ;;
+  esac
+}
+
 # --- Master file ---
 copy_file "$SCRIPT_DIR/AGENT.md" "$TARGET/AGENT.md" "AGENT.md"
 
@@ -182,13 +277,27 @@ for TOOL in $AGENT_LIST; do
       if [ "$DRY_RUN" -eq 0 ]; then
         mkdir -p "$TARGET/.codex/hooks" "$TARGET/.agents/skills"
       fi
-      copy_file "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json"
+      merge_hook_config "$SCRIPT_DIR/.codex/hooks.json" "$TARGET/.codex/hooks.json" ".codex/hooks.json" "$CODEX_HOOKS"
       for H in "$SCRIPT_DIR/.codex/hooks/"*.sh; do
         [ -f "$H" ] || continue
         copy_file "$H" "$TARGET/.codex/hooks/$(basename "$H")" ".codex/hooks/$(basename "$H")"
       done
       if [ "$DRY_RUN" -eq 0 ]; then
         chmod +x "$TARGET/.codex/hooks/"*.sh 2>/dev/null || true
+      fi
+
+      # Codex wrappers intentionally reuse the host-neutral policies under
+      # .claude/hooks. A Codex-only installation still needs those scripts,
+      # but does not need or install Claude settings.
+      if ! echo " $AGENT_LIST " | grep -q " claude "; then
+        [ "$DRY_RUN" -eq 0 ] && mkdir -p "$TARGET/.claude/hooks"
+        for H in _lib.sh block-destructive.sh truncation-check.sh \
+          stop-verify.sh state-enforcement.sh sensory-reminder.sh; do
+          copy_file "$SCRIPT_DIR/.claude/hooks/$H" "$TARGET/.claude/hooks/$H" ".claude/hooks/$H (shared core)"
+        done
+        if [ "$DRY_RUN" -eq 0 ]; then
+          chmod +x "$TARGET/.claude/hooks/"*.sh 2>/dev/null || true
+        fi
       fi
       for S in "$SCRIPT_DIR/.agents/skills/"*; do
         [ -d "$S" ] || continue
@@ -213,71 +322,13 @@ done
 if echo " $AGENT_LIST " | grep -q " claude "; then
   [ "$DRY_RUN" -eq 0 ] && mkdir -p "$TARGET/.claude/hooks"
 
-  # settings.json handling is explicit — people hand-wire hooks and we
-  # must not silently clobber them. Default is skip.
+  # settings.json handling is explicit and non-destructive. Merge is the
+  # default so agent-md works on first install without replacing manually
+  # wired third-party hooks.
   SETTINGS_SRC="$SCRIPT_DIR/.claude/settings.json"
   SETTINGS_DST="$TARGET/.claude/settings.json"
   if [ -f "$SETTINGS_SRC" ]; then
-    if [ ! -f "$SETTINGS_DST" ]; then
-      # No existing settings — always copy.
-      if [ "$DRY_RUN" -eq 1 ]; then
-        echo "  → would write     .claude/settings.json"
-      else
-        cp "$SETTINGS_SRC" "$SETTINGS_DST"
-        echo "  ✓ .claude/settings.json"
-      fi
-    else
-      case "$CLAUDE_SETTINGS" in
-        skip)
-          echo "  · .claude/settings.json exists — not touched (--claude-settings=merge|replace to change)"
-          ;;
-        replace)
-          if [ "$DRY_RUN" -eq 1 ]; then
-            echo "  → would back up + replace .claude/settings.json"
-          else
-            backup_if_exists "$SETTINGS_DST"
-            cp "$SETTINGS_SRC" "$SETTINGS_DST"
-            echo "  ✓ .claude/settings.json (replaced, backup kept)"
-          fi
-          ;;
-        merge)
-          if ! command -v jq &>/dev/null; then
-            echo "  ! jq required for --claude-settings=merge — skipping settings.json"
-          elif [ "$DRY_RUN" -eq 1 ]; then
-            echo "  → would merge     .claude/settings.json (hooks block only)"
-          else
-            # Capture the original BEFORE backup (which moves the file away).
-            TMP_ORIG=$(mktemp)
-            cp "$SETTINGS_DST" "$TMP_ORIG"
-            backup_if_exists "$SETTINGS_DST"
-            TMP_MERGED=$(mktemp)
-            # Merge semantics:
-            #   - top-level keys: union, ours wins on conflict for non-hook keys
-            #   - .hooks: for each event (PreToolUse, PostToolUse, Stop, ...)
-            #     concatenate user's entries with ours so both fire.
-            if jq -s '
-              .[0] as $a | .[1] as $b |
-              ($a * $b) |
-              .hooks = (
-                (($a.hooks // {}) | keys) + (($b.hooks // {}) | keys) | unique
-                | map(. as $k | {($k): (($a.hooks[$k] // []) + ($b.hooks[$k] // []))})
-                | add
-              )
-            ' "$TMP_ORIG" "$SETTINGS_SRC" > "$TMP_MERGED" 2>/dev/null; then
-              mv "$TMP_MERGED" "$SETTINGS_DST"
-              echo "  ✓ .claude/settings.json (merged)"
-            else
-              # Merge failed — restore the original so we don't leave the
-              # user with nothing.
-              cp "$TMP_ORIG" "$SETTINGS_DST"
-              echo "  ! merge failed — restored original from backup"
-              rm -f "$TMP_MERGED"
-            fi
-            rm -f "$TMP_ORIG"
-          fi
-          ;;
-      esac
-    fi
+    merge_hook_config "$SETTINGS_SRC" "$SETTINGS_DST" ".claude/settings.json" "$CLAUDE_SETTINGS"
   fi
 
   if [ "$DRY_RUN" -eq 0 ]; then
@@ -294,11 +345,17 @@ if echo " $AGENT_LIST " | grep -q " claude "; then
 fi
 
 # --- Memory system (never overwrite user's state) ---
+MEMORY_TEMPLATE_DIR="$SCRIPT_DIR/.agent-md/templates/memory"
+if [ ! -d "$MEMORY_TEMPLATE_DIR" ]; then
+  # Compatibility for source archives produced before templates were
+  # separated from this repository's own operational state.
+  MEMORY_TEMPLATE_DIR="$SCRIPT_DIR/memory"
+fi
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$TARGET/memory"
   for F in agents.md plan.md progress.md verify.md gotchas.md; do
-    if [ ! -f "$TARGET/memory/$F" ] && [ -f "$SCRIPT_DIR/memory/$F" ]; then
-      cp "$SCRIPT_DIR/memory/$F" "$TARGET/memory/$F"
+    if [ ! -f "$TARGET/memory/$F" ] && [ -f "$MEMORY_TEMPLATE_DIR/$F" ]; then
+      cp "$MEMORY_TEMPLATE_DIR/$F" "$TARGET/memory/$F"
     fi
   done
   echo "  ✓ memory/          (5-file state system; existing files preserved)"
@@ -363,6 +420,13 @@ if git -C "$TARGET" rev-parse --is-inside-work-tree &>/dev/null; then IN_GIT=1; 
 
 if [ "$IN_GIT" -eq 1 ]; then
   if [ "$DRY_RUN" -eq 0 ]; then
+    # Cursor/Windsurf rely on the universal pre-commit fallback. Install
+    # the shared classifier even when neither Claude nor Codex was chosen.
+    if ! echo " $AGENT_LIST " | grep -qE " (claude|codex) "; then
+      mkdir -p "$TARGET/.claude/hooks"
+      copy_file "$SCRIPT_DIR/.claude/hooks/_lib.sh" "$TARGET/.claude/hooks/_lib.sh" ".claude/hooks/_lib.sh (shared state core)"
+      chmod +x "$TARGET/.claude/hooks/_lib.sh"
+    fi
     mkdir -p "$TARGET/.githooks"
     copy_file "$SCRIPT_DIR/.githooks/pre-commit" "$TARGET/.githooks/pre-commit" ".githooks/pre-commit"
     chmod +x "$TARGET/.githooks/pre-commit"
@@ -398,7 +462,7 @@ fi
 echo ""
 echo "Next steps:"
 echo "  1. Read $TARGET/AGENT.md (the master directives)"
-echo "  2. (Optional) cp agent-md.toml.example agent-md.toml and declare your verify commands"
+echo "  2. (Optional) cp agent-md.toml.example agent-md.toml and declare verification/state policy"
 echo "  3. Edit memory/plan.md with your project's design"
 echo "  4. Start your agent — it reads directives automatically"
 NEXT_STEP=5
@@ -407,7 +471,5 @@ if [ "$IN_GIT" -eq 1 ] && [ "$GITHOOKS" = "no" ]; then
   NEXT_STEP=$((NEXT_STEP + 1))
 fi
 if echo " $AGENT_LIST " | grep -q " codex "; then
-  echo "  ${NEXT_STEP}. (Codex) Enable hooks in ~/.codex/config.toml:"
-  echo "       [features]"
-  echo "       codex_hooks = true"
+  echo "  ${NEXT_STEP}. (Codex) Confirm hook support with: codex features list"
 fi

@@ -33,6 +33,7 @@ EOF
   touch src.ts
   out=$(run_hook post-edit-verify.sh '{"tool_input":{"file_path":"src.ts"}}')
   echo "$out" | jq -e '.decision == "block"' > /dev/null
+  echo "$out" | jq -e '.reason | test("ERROR VERIFY_REQUIRED_FAILED")' > /dev/null
 }
 
 @test "{file} substitution passes file path to command" {

@@ -37,6 +37,105 @@ read_toml() {
   ' "$file"
 }
 
+# read_toml_array <file> <section> <key>
+# Prints one quoted string per line. Return codes distinguish a valid key
+# (0, including an empty array), a missing key/file (1), and malformed
+# input (2). This intentionally implements only the string-array subset
+# agent-md exposes; it is not a general TOML parser.
+read_toml_array() {
+  local file="$1" section="$2" key="$3"
+  [ -f "$file" ] || return 1
+  awk -v wanted_section="$section" -v wanted_key="$key" '
+    function invalid() { bad = 1 }
+
+    function parse_value(text,    i, c) {
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+
+        if (done) {
+          if (c == "#") return
+          if (c !~ /[[:space:]]/) invalid()
+          continue
+        }
+
+        if (quoted) {
+          if (escaped) {
+            value = value c
+            escaped = 0
+          } else if (quote == "\"" && c == "\\") {
+            escaped = 1
+          } else if (c == quote) {
+            print value
+            value = ""
+            quoted = 0
+            need_separator = 1
+          } else {
+            value = value c
+          }
+          continue
+        }
+
+        if (c == "#") return
+        if (c ~ /[[:space:]]/) continue
+
+        if (!opened) {
+          if (c == "[") opened = 1
+          else invalid()
+          continue
+        }
+
+        if (need_separator) {
+          if (c == ",") need_separator = 0
+          else if (c == "]") done = 1
+          else invalid()
+          continue
+        }
+
+        if (c == "\"" || c == "\047") {
+          quoted = 1
+          quote = c
+        } else if (c == "]") {
+          done = 1
+        } else {
+          invalid()
+        }
+      }
+    }
+
+    BEGIN { in_section = 0 }
+
+    found && !done {
+      parse_value($0)
+      next
+    }
+
+    /^[[:space:]]*#/ { next }
+
+    /^[[:space:]]*\[/ {
+      current = $0
+      sub(/^[[:space:]]*\[/, "", current)
+      sub(/\][[:space:]]*(#.*)?$/, "", current)
+      gsub(/[[:space:]]/, "", current)
+      in_section = (current == wanted_section)
+      next
+    }
+
+    in_section && index($0, "=") > 0 {
+      candidate = substr($0, 1, index($0, "=") - 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
+      if (candidate == wanted_key) {
+        found = 1
+        parse_value(substr($0, index($0, "=") + 1))
+      }
+    }
+
+    END {
+      if (bad || (found && (!opened || !done || quoted))) exit 2
+      if (!found) exit 1
+    }
+  ' "$file"
+}
+
 # toml_path — location of the config file (override with AGENT_MD_TOML env)
 toml_path() {
   echo "${AGENT_MD_TOML:-agent-md.toml}"
@@ -50,6 +149,47 @@ stat_mtime() {
 # file_size <path> — portable byte size (Linux + macOS).
 file_size() {
   stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null
+}
+
+# policy_result_json <status> <severity> <code> <message> <suggestion> [paths]
+# Builds the small internal result contract shared by agent-md controls.
+# Paths are newline-delimited so filenames containing spaces remain intact.
+# Hook wrappers translate this result to each host's existing JSON shape.
+policy_result_json() {
+  local result_status="$1" severity="$2" code="$3" message="$4"
+  local suggestion="$5" paths="${6:-}" paths_json
+  paths_json=$(printf '%s' "$paths" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  jq -cn \
+    --arg status "$result_status" \
+    --arg severity "$severity" \
+    --arg code "$code" \
+    --arg message "$message" \
+    --arg suggestion "$suggestion" \
+    --argjson paths "$paths_json" '
+      {
+        status: $status,
+        severity: $severity,
+        code: $code,
+        message: $message,
+        suggestion: $suggestion
+      } + if ($paths | length) > 0 then {paths: $paths} else {} end
+    '
+}
+
+# policy_human_message <policy-result-json>
+# Keeps hook output readable while exposing stable severity/code tokens.
+policy_human_message() {
+  local result="$1" severity code message suggestion paths rendered
+  severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
+  code=$(printf '%s' "$result" | jq -r '.code')
+  message=$(printf '%s' "$result" | jq -r '.message')
+  suggestion=$(printf '%s' "$result" | jq -r '.suggestion // empty')
+  paths=$(printf '%s' "$result" | jq -r '(.paths // []) | join(", ")')
+
+  rendered="[${severity} ${code}] ${message}"
+  [ -z "$paths" ] || rendered="${rendered} Paths: ${paths}."
+  [ -z "$suggestion" ] || rendered="${rendered} Recovery: ${suggestion}"
+  printf '%s\n' "$rendered"
 }
 
 # detect_pm — prints the detected Node package manager based on lockfile,
@@ -82,94 +222,214 @@ has_npm_test_script() {
   [ -n "$t" ] && [ "$t" != 'echo "Error: no test specified" && exit 1' ]
 }
 
-# progress_stale_reason — prints a human-readable blocking reason when
-# source files changed without memory/progress.md being updated too, or
-# when memory/gotchas.md gained an entry without an explicit **Rule**.
-# Prints nothing when everything's in order (nothing to block on).
-#
-# Shared between the Stop hook (state-enforcement.sh) and the PreCompact
-# hook (precompact-state-check.sh) — same underlying question ("did
-# meaningful work happen without memory being updated"), just triggered
-# at two different moments and reported via two different JSON shapes.
-progress_stale_reason() {
-  [ -f "memory/progress.md" ] || return 0
+# Defaults intentionally favor executable product/test code. Metadata and
+# agent infrastructure are excluded separately. scripts/** and tools/**
+# are not ignored: executable files there match the extension globs below.
+default_source_globs() {
+  printf '%s\n' \
+    'src/**' 'app/**' 'apps/**' 'lib/**' 'packages/**' \
+    'test/**' 'tests/**' 'spec/**' \
+    '*.c' '*.cc' '*.cpp' '*.cxx' '*.h' '*.hpp' '*.cs' \
+    '*.go' '*.java' '*.kt' '*.kts' '*.php' '*.py' '*.pyi' \
+    '*.rb' '*.rs' '*.scala' '*.swift' \
+    '*.sh' '*.bash' '*.zsh' '*.bats' \
+    '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' \
+    '*.vue' '*.svelte' '*.astro' '*.html' \
+    '*.css' '*.scss' '*.sass' '*.less' \
+    '*.sql' '*.graphql' '*.gql' '*.proto' '*.tf'
+}
+
+default_ignore_globs() {
+  printf '%s\n' \
+    'memory/**' 'docs/**' '.agent/**' '.agent-md/**' '.agents/**' \
+    '.claude/**' '.codex/**' '.cursor/**' '.githooks/**' \
+    '.github/**' '.windsurf/**' \
+    '*.md' 'LICENSE' 'LICENSE.*' \
+    '.gitignore' '.gitattributes' '.editorconfig' '.ai-memory.toml' \
+    'agent-md.toml' 'agent-md.toml.example'
+}
+
+# load_state_globs — populates the two newline-delimited globals below.
+# A configured key replaces its default independently. Empty arrays are
+# therefore meaningful and must not be confused with absent keys.
+load_state_globs() {
+  local config parsed status
+  config=$(toml_path)
+  AGENT_MD_STATE_ERROR=""
+
+  parsed=$(read_toml_array "$config" state source_globs)
+  status=$?
+  case "$status" in
+    0) AGENT_MD_SOURCE_GLOBS="$parsed" ;;
+    1) AGENT_MD_SOURCE_GLOBS=$(default_source_globs) ;;
+    *)
+      AGENT_MD_STATE_ERROR="Invalid ${config}: state.source_globs must be an array of quoted strings."
+      return 2
+      ;;
+  esac
+
+  parsed=$(read_toml_array "$config" state ignore_globs)
+  status=$?
+  case "$status" in
+    0) AGENT_MD_IGNORE_GLOBS="$parsed" ;;
+    1) AGENT_MD_IGNORE_GLOBS=$(default_ignore_globs) ;;
+    *)
+      AGENT_MD_STATE_ERROR="Invalid ${config}: state.ignore_globs must be an array of quoted strings."
+      return 2
+      ;;
+  esac
+}
+
+path_matches_globs() {
+  local path="$1" patterns="$2" pattern
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    # shellcheck disable=SC2254
+    case "$path" in
+      $pattern) return 0 ;;
+    esac
+  done <<EOF
+$patterns
+EOF
+  return 1
+}
+
+path_is_operationally_relevant() {
+  local path="$1"
+  path_matches_globs "$path" "$AGENT_MD_IGNORE_GLOBS" && return 1
+  path_matches_globs "$path" "$AGENT_MD_SOURCE_GLOBS"
+}
+
+changed_files() {
+  local scope="${1:-worktree}"
+  if [ "$scope" = "staged" ]; then
+    git diff --cached --name-only -- 2>/dev/null
+    return
+  fi
+  {
+    git diff --name-only -- 2>/dev/null
+    git diff --cached --name-only -- 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  } | sort -u
+}
+
+filter_operationally_relevant_files() {
+  local file
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if path_is_operationally_relevant "$file"; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+# state_enforcement_result [worktree|staged] — emits a structured failure
+# when an Integrity invariant is violated. Prints nothing on success.
+state_enforcement_result() {
+  local scope="${1:-worktree}"
   git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
-  local modified_files source_changed progress_changed
+  local modified_files relevant_files relevant_count progress_changed
   local gotchas_diff gotchas_changed gotchas_rules
 
-  modified_files=$(
-    {
-      git diff --name-only 2>/dev/null
-      git diff --cached --name-only 2>/dev/null
-      # Untracked files too — a brand-new source file still counts as a change
-      git ls-files --others --exclude-standard 2>/dev/null
-    } | sort -u
-  )
+  if [ -f "memory/progress.md" ]; then
+    if ! load_state_globs; then
+      policy_result_json \
+        "fail" "error" "CONFIG_INVALID" \
+        "$AGENT_MD_STATE_ERROR" \
+        "Fix the enforcement configuration before finishing."
+      return 0
+    fi
+  fi
 
-  # Exclusions: tooling, docs, agent scratch state (.agent/), and the
-  # directive-alias files that the installer copies from AGENT.md.
-  source_changed=$(
-    echo "$modified_files" \
-      | grep -vE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)' \
-      | grep -v '^$' \
-      | grep -cvE '\.md$'
-  )
-  source_changed=${source_changed:-0}
+  modified_files=$(changed_files "$scope")
 
   # A correction must become a reusable rule, not merely a historical note.
   # This only applies when gotchas changed; ordinary source work does not
   # need a new gotcha entry.
-  gotchas_diff=$( {
-    git diff -- memory/gotchas.md 2>/dev/null
-    git diff --cached -- memory/gotchas.md 2>/dev/null
-  } )
+  if [ "$scope" = "staged" ]; then
+    gotchas_diff=$(git diff --cached -- memory/gotchas.md 2>/dev/null)
+  else
+    gotchas_diff=$( {
+      git diff -- memory/gotchas.md 2>/dev/null
+      git diff --cached -- memory/gotchas.md 2>/dev/null
+    } )
+  fi
   gotchas_changed=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+[^+]' || true)
   gotchas_rules=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+.*\*\*Rule\*\*:' || true)
 
   if [ "$gotchas_changed" -gt 0 ] && [ "$gotchas_rules" -eq 0 ]; then
-    echo "State enforcement: memory/gotchas.md changed without an explicit **Rule**. Convert the recorded failure into a concrete prevention rule before finishing."
+    policy_result_json \
+      "fail" "error" "STATE_GOTCHA_RULE_MISSING" \
+      "memory/gotchas.md changed without an explicit **Rule**." \
+      "Convert the recorded failure into a concrete prevention rule before finishing." \
+      "memory/gotchas.md"
     return 0
   fi
 
-  [ "$source_changed" -eq 0 ] && return 0
+  [ -f "memory/progress.md" ] || return 0
 
-  progress_changed=$(echo "$modified_files" | grep -c '^memory/progress\.md$')
+  relevant_files=$(printf '%s\n' "$modified_files" | filter_operationally_relevant_files)
+  relevant_count=$(printf '%s\n' "$relevant_files" | grep -c . || true)
+  relevant_count=${relevant_count:-0}
+  [ "$relevant_count" -eq 0 ] && return 0
+
+  progress_changed=$(printf '%s\n' "$modified_files" | grep -c '^memory/progress\.md$' || true)
   progress_changed=${progress_changed:-0}
 
   # Repos may gitignore memory/ (e.g. a global ~/.gitignore excluding it).
   # git diff/ls-files never sees those edits, so progress_changed would be
-  # stuck at 0 forever once any source file changes. Fall back to mtime:
-  # a progress.md newer than every modified source file counts as updated.
+  # stuck at 0 forever once any relevant file changes. Fall back to mtime:
+  # progress.md newer than every modified relevant file counts as updated.
   if [ "$progress_changed" -eq 0 ] && git check-ignore -q memory/progress.md 2>/dev/null; then
-    local progress_mtime newest_source_mtime file file_mtime
+    local progress_mtime newest_source_mtime file file_mtime all_sources_exist
     progress_mtime=$(stat_mtime memory/progress.md)
     progress_mtime=${progress_mtime:-0}
     newest_source_mtime=0
+    all_sources_exist=1
     while IFS= read -r file; do
       [ -z "$file" ] && continue
-      [ -e "$file" ] || continue
-      if echo "$file" \
-        | grep -qE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)'; then
+      if [ ! -e "$file" ]; then
+        all_sources_exist=0
         continue
       fi
-      echo "$file" | grep -qE '\.md$' && continue
       file_mtime=$(stat_mtime "$file")
       file_mtime=${file_mtime:-0}
       if [ "$file_mtime" -gt "$newest_source_mtime" ]; then
         newest_source_mtime=$file_mtime
       fi
     done <<EOF
-$modified_files
+$relevant_files
 EOF
-    if [ "$progress_mtime" -ge "$newest_source_mtime" ]; then
+    if [ "$all_sources_exist" -eq 1 ] \
+       && [ "$progress_mtime" -ge "$newest_source_mtime" ]; then
       progress_changed=1
     fi
   fi
 
   if [ "$progress_changed" -eq 0 ]; then
-    echo "State enforcement: ${source_changed} source file(s) modified but memory/progress.md was not updated. Update progress.md to reflect completed atomic tasks before finishing, or state explicitly why this work did not require progress tracking."
+    local paths
+    paths=$(printf '%s\n' "$relevant_files" | awk 'NR <= 10')
+    policy_result_json \
+      "fail" "error" "STATE_PROGRESS_STALE" \
+      "${relevant_count} operationally relevant file(s) changed but memory/progress.md was not updated." \
+      "Update memory/progress.md to reflect the current task state before finishing." \
+      "$paths"
   fi
+}
+
+# state_enforcement_reason [worktree|staged] — backward-compatible human
+# adapter used by Claude/Codex Stop hooks and the pre-commit fallback.
+state_enforcement_reason() {
+  local result
+  result=$(state_enforcement_result "${1:-worktree}")
+  [ -z "$result" ] || policy_human_message "$result"
+}
+
+# Backward-compatible name used by existing Stop wrappers and downstream
+# integrations copied from earlier agent-md releases.
+progress_stale_reason() {
+  state_enforcement_reason worktree
 }
 
 # visual_evidence_ok <artifacts_dir> <freshness_seconds>

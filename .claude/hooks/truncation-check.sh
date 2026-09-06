@@ -4,6 +4,9 @@
 # Detects when tool output was truncated (>50K chars -> 2KB preview).
 # Injects a warning so the agent knows to read the full file or narrow scope.
 
+# shellcheck source=.claude/hooks/_lib.sh
+. "$(dirname "$0")/_lib.sh"
+
 INPUT=$(cat)
 
 # Extract tool_response as string - handles both string and object responses
@@ -17,7 +20,11 @@ TOOL_RESPONSE=$(echo "$INPUT" | jq -r '
 # Check for the persisted-output truncation marker
 if echo "$TOOL_RESPONSE" | grep -q "Output too large"; then
   # Warn but don't block - the tool already ran, blocking won't undo it
-  MSG="WARNING: Tool output was truncated to a 2KB preview. The full output was saved to disk. Read the full file at the given path before acting on these results, or re-run with narrower scope (single directory, stricter pattern)."
+  RESULT=$(policy_result_json \
+    "warn" "warning" "DIAGNOSTIC_OUTPUT_TRUNCATED" \
+    "Tool output was truncated to a preview; incomplete output must not be treated as complete evidence." \
+    "Read the persisted full output before acting, or rerun with a narrower scope.")
+  MSG=$(policy_human_message "$RESULT")
   jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $m}}'
   exit 0
 fi

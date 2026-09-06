@@ -1,14 +1,14 @@
 #!/bin/bash
 # state-enforcement.sh
-# Stop hook: blocks task completion if source files changed but
-# memory/progress.md was NOT updated. Part of the memory system.
+# Stop hook: blocks task completion if operationally relevant files
+# changed but memory/progress.md was NOT updated.
 #
 # Skipped if memory/progress.md doesn't exist (memory system not
 # installed) or if we're not in a git repo.
 #
 # No stop_hook_active bypass. A retry does not make a missing progress
-# update disappear. The only way out is to stage/commit progress.md,
-# or to delete memory/progress.md and opt out of the memory layer.
+# update disappear. The only way out is to update progress.md, correct
+# an invalid [state] configuration, or remove progress.md to opt out.
 #
 # Hook output contract: exit 0 + JSON block decision on stdout. Earlier
 # versions mixed JSON with exit 2, which Claude silently discarded.
@@ -21,9 +21,10 @@
 # Read and discard stdin.
 cat > /dev/null
 
+# shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
 
-REASON=$(progress_stale_reason)
+REASON=$(state_enforcement_reason worktree)
 if [ -n "$REASON" ]; then
   jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
 fi

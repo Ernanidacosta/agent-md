@@ -7,6 +7,7 @@ that reads a rules file.
 Some behavior is enforceable by hooks. Most judgment-heavy guidance is
 advisory because the agent still has to read and follow it. Treat hooks,
 tests, git state, screenshots, and evidence notes as the real contract.
+The policy boundary is: **enforce facts; advise judgment**.
 
 ---
 
@@ -19,25 +20,58 @@ explicitly delegated the choice to you.
 
 Default priorities:
 
-1. Correctness
-2. Maintainability
-3. Minimal surface area
-4. Speed
+1. Safety
+2. Correctness
+3. Reliability
+4. Maintainability
+5. Minimal surface area
+6. Speed
+
+Security and reliability invariants always override autonomy, speed,
+convenience, and token efficiency. Optional integrations must never
+weaken enforcement. A failed safety or integrity mechanism must fail
+visibly. Prefer structured evidence over interpretation of natural
+language. Git remains the factual source of truth. agent-md must remain
+standalone and dependency-light.
 
 ---
 
-## 2. Persistent State
+## 2. Operational State And Memory Boundaries
 
-Chat history is not durable memory. On session start, read these files
-when they exist. As work progresses, keep them accurate.
+Three systems have distinct responsibilities:
+
+- **agent-md `memory/`** — current operational state and deterministic
+  handoff: the active plan, task status, relevant gotchas, and definition
+  of done.
+- **ICM (optional)** — semantic and historical recall across agents:
+  older decisions, resolved failures, and long-term project knowledge.
+- **Git** — factual source of truth for code and its history.
+
+Chat history is not durable state. On session start, read these files
+when they exist and keep them accurate as work progresses.
 
 - `memory/agents.md` — active agents, MCPs, tech stack, tooling
-- `memory/plan.md` — macro design and vertical slices
-- `memory/progress.md` — atomic task checklist and current status
+- `memory/plan.md` — current direction and implementation slices
+- `memory/progress.md` — current task, next steps, blockers, and up to
+  five recently completed outcomes
 - `memory/verify.md` — definition of done and required checks
-- `memory/gotchas.md` — mistakes already corrected by the human
+- `memory/gotchas.md` — prevention rules for traps that remain relevant
 
 If the files do not exist, initialize them before substantive work.
+Prune stale material instead of accumulating an infinite journal.
+
+When `agent-md.toml` declares `[integrations.icm] enabled = true`, use
+the available ICM integration for historical or cross-agent recall when
+needed. Do not copy recalled history wholesale into `memory/`; keep only
+the operational consequence that affects current work. Never require ICM
+for agent-md hooks, verification, safety, or task completion.
+
+### Architectural Non-Goals
+
+agent-md is not semantic memory, a multi-agent orchestrator, a model
+router, a background daemon, a project-management platform, a
+replacement for Git or CI, or a general-purpose agent runtime. Keep
+those boundaries explicit when evaluating new features.
 
 ---
 
@@ -208,12 +242,16 @@ prose conventions.
 - Validate structured output before use: required fields, types, allowed
   values, and paths. Reject malformed tool arguments instead of guessing.
 - When you control helper output, return structured failures with
-  `status`, `type`, `message`, and `suggestion`.
+  `status`, `severity`, `code`, `message`, and `suggestion`, plus
+  contextual evidence such as `paths` when applicable. Codes are stable;
+  host-facing wrappers may preserve a text protocol but must include the
+  severity and code in their human-readable message.
 - Run independent tool calls in parallel when safe, then reconcile the
   results. Do not parallelize dependent steps.
 - Use selective context loading. Read only relevant files or history,
-  summarize durable findings into `memory/`, and avoid pasting large
-  static prompts or raw dumps into every turn.
+  keep current operational consequences in `memory/`, use ICM for
+  semantic history when enabled, and avoid pasting raw dumps into every
+  turn.
 - When a host exposes model or reasoning controls, use the cheapest
   capable mode for routine execution and reserve expensive reasoning for
   architecture, high-risk decisions, or failure analysis.
@@ -222,6 +260,41 @@ prose conventions.
 - For high-stakes answers or risky changes, use an adversarial or
   independent verification step before presenting the result as reliable.
 
+### Severity And Control Categories
+
+Structured `status` is `pass`, `warn`, or `fail`. A hook may remain
+silent on ordinary success when its host protocol expects no output.
+
+- `info` — informational and never blocking.
+- `warning` — degraded condition or recommendation; never blocking.
+- `error` — an integrity or correctness guarantee is not satisfied;
+  blocking.
+- `fatal` — a safety, integrity, or destructive-operation risk;
+  immediately blocking.
+
+Do not automatically downgrade `error` or `fatal` after retries. A
+blocking result must state what failed, which guarantee is unsatisfied,
+and how to recover.
+
+Existing controls are classified as follows:
+
+- **Safety** — destructive-command, dangerous-path, and secret-boundary
+  protection in `block-destructive.sh`; normally `fatal`.
+- **Integrity** — valid enforcement configuration, operational-state
+  consistency, and required verification in Stop/PostToolUse/pre-commit;
+  normally `error`.
+- **Quality** — TDD and optional visual-evidence nudges; normally
+  `warning`.
+- **Diagnostic** — doctor, optional ICM presence, output truncation, and
+  environment/wiring information; `info` or `warning`. Doctor may still
+  fail when a missing core dependency makes installed enforcement
+  unusable.
+
+Safety violations, failed required verification, invalid enforcement
+configuration, and state-integrity violations fail closed. Missing
+optional integrations and diagnostics warn without blocking. There is no
+retry-count escape or automatic release for a real blocking result.
+
 ---
 
 ## 12. Context Management
@@ -229,6 +302,9 @@ prose conventions.
 - After long conversations, re-read relevant files before editing.
 - If memory is degrading, write the current state to `memory/progress.md`
   before compacting or handing work off.
+- Keep at most five recently completed outcomes in `progress.md`. Remove
+  superseded plan details and gotchas that no longer apply; Git and ICM,
+  when enabled, retain the history.
 - For large files, read focused chunks instead of relying on one huge
   output.
 - If tool output is truncated, read the saved full output or rerun a
@@ -238,8 +314,8 @@ prose conventions.
 
 ## 13. Self-Correction
 
-- After any correction from the human, add the pattern to
-  `memory/gotchas.md`.
+- After a correction from the human, add the pattern to
+  `memory/gotchas.md` only while the prevention rule remains relevant.
 - Each entry needs a `**Rule**:` line saying what to do differently next
   time. An error log without one is a note, not a correction. The `Stop`
   hook scans added lines in `memory/gotchas.md` for that literal marker
@@ -273,7 +349,7 @@ agent-specific locations.
 | Agent | Installed files | Native hooks installed? |
 |---|---|---|
 | Claude Code | `CLAUDE.md`, `.claude/settings.json`, `.claude/hooks/` | Yes |
-| Codex | `AGENTS.md`, `.codex/hooks.json`, `.codex/hooks/`, `.agents/skills/` | Yes, experimental |
+| Codex | `AGENTS.md`, `.codex/hooks.json`, `.codex/hooks/`, `.agents/skills/` | Yes |
 | Cursor | `AGENTS.md`, `.cursor/rules/agent-md.mdc` | No |
 | Windsurf | `AGENTS.md`, `.windsurf/rules/agent-md.md` | No |
 | Any other | `AGENT.md` if manually configured | No |
@@ -285,12 +361,8 @@ It is installed but not active by default:
 git config core.hooksPath .githooks
 ```
 
-Codex hooks are repo-local but require this in `~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
+Codex hooks are repo-local. Confirm hook support for the installed Codex
+version with `codex features list`.
 
 ### Declaring Verification Commands
 
@@ -310,15 +382,30 @@ lint_file = "npx --no-install eslint {file}"
 required          = true
 artifacts_dir     = ".agent/visual"
 freshness_seconds = 3600
+
+[state]
+source_globs = ["src/**", "app/**", "tests/**", "*.py", "*.ts"]
+ignore_globs = ["docs/**", ".ai-memory.toml", ".gitignore"]
+
+[integrations.icm]
+enabled = true
 ```
+
+Configured state lists replace their respective defaults. Ignore globs
+win over source globs. Invalid arrays block state enforcement with a
+configuration error instead of silently disabling it. `scripts/**` and
+`tools/**` are not ignored by default; executable files under them count
+when they match a source glob.
 
 ---
 
 ## 16. Commit Hygiene — AI Authorship
 
 - NEVER add `Co-Authored-By:` trailers with AI or agent names to commits.
-- NEVER version or commit AI agent configuration files, memory files,
-  skill definitions, or visual evidence artifacts.
+- Follow the repository's tracking policy for agent configuration,
+  operational memory, and skills. Do not blanket-stage them, but preserve
+  files the project deliberately versions, including `agent-md.toml`.
+- Never commit ephemeral scratch state or visual evidence artifacts.
 - Git history must look as if a human wrote every line.
 
 ---

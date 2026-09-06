@@ -56,12 +56,20 @@ if [ "$REQUIRED" = "true" ]; then
     exit 0
   fi
 
-  REASON="Visual validation required. ${UI_CHANGED} UI file(s) changed. ${ART_DIR} must contain a fresh non-empty markdown evidence file that references a fresh non-empty image by filename. Required markdown fields: Changed files, Route or URL, Viewport, Artifact, Observed result. Capture the screenshot (see ./.agent-md/bin/playwright-capture.sh), write the note next to it, retry. A screenshot alone is not verification."
+  RESULT=$(policy_result_json \
+    "fail" "error" "VERIFY_REQUIRED_FAILED" \
+    "Visual validation is required for ${UI_CHANGED} changed UI file(s), but structured evidence is missing from ${ART_DIR}." \
+    "Capture a fresh screenshot and add a fresh markdown note with Changed files, Route or URL, Viewport, Artifact, and Observed result; a screenshot alone is not verification.")
+  REASON=$(policy_human_message "$RESULT")
   jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
   exit 0
 fi
 
 # Reminder mode (default, advisory)
-MSG="UI files changed (${UI_CHANGED}). Before marking complete: (1) build and render the change, (2) capture a screenshot (see ./.agent-md/bin/playwright-capture.sh), (3) write a markdown note next to it that references the image filename and records Changed files, Route or URL, Viewport, Artifact, and Observed result, (4) have it reviewed by an independent verifier. Do not self-grade. (Set [visual] required = true in agent-md.toml to turn this into a hard block.)"
+RESULT=$(policy_result_json \
+  "warn" "warning" "QUALITY_VISUAL_EVIDENCE_RECOMMENDED" \
+  "UI files changed (${UI_CHANGED}) without required visual evidence." \
+  "Build and render the change, capture a screenshot, and record Changed files, Route or URL, Viewport, Artifact, and Observed result in a markdown note. Set [visual] required = true to make this blocking.")
+MSG=$(policy_human_message "$RESULT")
 jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
 exit 0

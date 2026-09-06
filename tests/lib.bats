@@ -65,6 +65,45 @@ EOF
   [ -z "$result" ]
 }
 
+@test "read_toml_array: parses inline quoted values" {
+  cat > agent-md.toml <<'EOF'
+[state]
+source_globs = ["src/**", '*.py']
+EOF
+  . .claude/hooks/_lib.sh
+  result="$(read_toml_array agent-md.toml state source_globs)"
+  [ "$result" = $'src/**\n*.py' ]
+}
+
+@test "read_toml_array: parses multiline values and comments" {
+  cat > agent-md.toml <<'EOF'
+[state]
+ignore_globs = [
+  "docs/**", # documentation
+  ".ai-memory.toml",
+]
+EOF
+  . .claude/hooks/_lib.sh
+  result="$(read_toml_array agent-md.toml state ignore_globs)"
+  [ "$result" = $'docs/**\n.ai-memory.toml' ]
+}
+
+@test "read_toml_array: distinguishes empty, missing, and invalid arrays" {
+  cat > agent-md.toml <<'EOF'
+[state]
+source_globs = []
+ignore_globs = [docs/**]
+EOF
+  . .claude/hooks/_lib.sh
+  run read_toml_array agent-md.toml state source_globs
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run read_toml_array agent-md.toml state absent
+  [ "$status" -eq 1 ]
+  run read_toml_array agent-md.toml state ignore_globs
+  [ "$status" -eq 2 ]
+}
+
 @test "detect_pm: pnpm wins on pnpm-lock" {
   touch pnpm-lock.yaml package-lock.json
   . .claude/hooks/_lib.sh

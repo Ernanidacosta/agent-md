@@ -23,6 +23,20 @@ log() { printf '\033[36m▸\033[0m %s\n' "$*"; }
 err() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 ok()  { printf '\033[32m✓\033[0m %s\n' "$*"; }
 
+policy_message() {
+  local severity="$1" code="$2" message="$3" suggestion="$4" result
+  if command -v policy_result_json >/dev/null 2>&1; then
+    result=$(policy_result_json \
+      "$( [ "$severity" = "warning" ] && printf warn || printf fail )" \
+      "$severity" "$code" "$message" "$suggestion")
+    policy_human_message "$result"
+  else
+    printf '[%s %s] %s Recovery: %s\n' \
+      "$(printf '%s' "$severity" | tr '[:lower:]' '[:upper:]')" \
+      "$code" "$message" "$suggestion"
+  fi
+}
+
 log "agent-md pre-commit verification"
 
 # --- Shared helpers ---
@@ -31,7 +45,9 @@ log "agent-md pre-commit verification"
 if [ -f ".claude/hooks/_lib.sh" ]; then
   # shellcheck source=.claude/hooks/_lib.sh
   . ".claude/hooks/_lib.sh"
+  SHARED_STATE_AVAILABLE=1
 else
+  SHARED_STATE_AVAILABLE=0
   read_toml() {
     local file="$1" section="$2" key="$3"
     [ -f "$file" ] || return 0
@@ -87,7 +103,10 @@ run_check() {
   if eval "$cmd"; then
     ok "$label"
   else
-    err "$label failed"
+    err "$(policy_message \
+      error VERIFY_REQUIRED_FAILED \
+      "Required verification failed: ${label}." \
+      "Fix the reported check, re-stage, and retry.")"
     FAIL=1
   fi
 }
@@ -141,36 +160,24 @@ else
   fi
 fi
 
-# --- State enforcement (memory/progress.md) ---
-if [ -f "memory/progress.md" ]; then
-  STAGED=$(git diff --cached --name-only)
-  SOURCE_CHANGED=$(
-    echo "$STAGED" \
-      | grep -vE '^(memory/|docs/|\.agent/|\.agent-md/|\.agents/|\.claude/|\.codex/|\.cursor/|\.githooks/|\.windsurf/|README\.md$|LICENSE$|AGENT\.md$|AGENTS\.md$|CLAUDE\.md$|agent-md\.toml(\.example)?$)' \
-      | grep -v '^$' \
-      | grep -cvE '\.md$' || true
-  )
-  PROGRESS_STAGED=$(echo "$STAGED" | grep -c '^memory/progress\.md$' || true)
-
-  if [ "${SOURCE_CHANGED:-0}" -gt 0 ] && [ "${PROGRESS_STAGED:-0}" -eq 0 ]; then
-    err "memory/progress.md not staged — ${SOURCE_CHANGED} source file(s) changed without progress update"
+# --- Operational state enforcement ---
+# Uses the exact same classifier as Claude/Codex Stop. New installs always
+# include _lib.sh; the fallback warning only covers manually copied legacy
+# pre-commit hooks.
+if [ "$SHARED_STATE_AVAILABLE" -eq 1 ]; then
+  STATE_REASON=$(state_enforcement_reason staged)
+  if [ -n "$STATE_REASON" ]; then
+    err "$STATE_REASON"
     FAIL=1
   else
-    ok "progress.md up to date"
+    ok "operational state up to date"
   fi
-fi
-
-# --- Learning enforcement (memory/gotchas.md) ---
-# When a correction is recorded, it must include a prevention rule.
-GOTCHAS_STAGED=$(git diff --cached -- memory/gotchas.md)
-GOTCHAS_CHANGED=$(printf '%s\n' "$GOTCHAS_STAGED" | grep -cE '^\+[^+]' || true)
-GOTCHAS_RULES=$(printf '%s\n' "$GOTCHAS_STAGED" | grep -cE '^\+.*\*\*Rule\*\*:' || true)
-
-if [ "$GOTCHAS_CHANGED" -gt 0 ] && [ "$GOTCHAS_RULES" -eq 0 ]; then
-  err "memory/gotchas.md changed without an explicit **Rule**"
-  FAIL=1
 else
-  ok "recorded corrections include prevention rules"
+  err "$(policy_message \
+    error CONFIG_INVALID \
+    "The shared state classifier is unavailable, so the state-integrity guarantee could not run." \
+    "Reinstall agent-md before committing.")"
+  FAIL=1
 fi
 
 echo ""
@@ -181,8 +188,10 @@ if [ "$FAIL" -eq 1 ]; then
 fi
 
 if [ "$CHECKS" -eq 0 ]; then
-  log "No type-checker, linter, or test suite detected. Commit allowed but unverified."
-  log "Declare commands in agent-md.toml to make this deterministic."
+  log "$(policy_message \
+    warning VERIFY_NOT_CONFIGURED \
+    "No type-checker, linter, or test suite was detected; commit is allowed but unverified." \
+    "Declare commands in agent-md.toml to make verification deterministic.")"
 else
   ok "All $CHECKS check(s) passed."
 fi

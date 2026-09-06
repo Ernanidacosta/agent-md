@@ -10,9 +10,15 @@
 # invocations, or anything you `chmod +x` and run. For real isolation,
 # run the agent in a container or VM.
 
+# shellcheck source=.claude/hooks/_lib.sh
+. "$(dirname "$0")/_lib.sh"
+
 deny() {
-  # $1 = reason
-  jq -n --arg r "$1" '{
+  # $1 = stable code, $2 = failure, $3 = recovery guidance
+  local result reason
+  result=$(policy_result_json "fail" "fatal" "$1" "$2" "$3")
+  reason=$(policy_human_message "$result")
+  jq -n --arg r "$reason" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
@@ -33,35 +39,47 @@ fi
 # shellcheck disable=SC2016
 
 # Block recursive deletion of root, cwd, home, or parent directory
-if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|(-[a-zA-Z]*\s+)*)(\/($|[[:space:];&|])|(~|\$HOME|\.\.)(/|$|[[:space:];&|])|\.($|[[:space:];&|]))'; then
-  deny "Blocked destructive rm command targeting root, home, or parent directory. If intentional, run manually."
+if echo "$COMMAND" | grep -qE 'rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|(-[a-zA-Z]*\s+)*)(/($|[[:space:];&|])|(~|\$HOME|\.\.)(/|$|[[:space:];&|])|\.($|[[:space:];&|]))'; then
+  deny "SAFETY_PATH_VIOLATION" \
+    "Blocked destructive rm command targeting root, home, or a parent path." \
+    "Run the command manually only after validating the exact target and recovery plan."
 fi
 
 # Block find -delete / find -exec rm chains
 if echo "$COMMAND" | grep -qE 'find\s+.*(-delete|-exec\s+rm)'; then
-  deny "Blocked find -delete / find -exec rm. If intentional, run manually."
+  deny "SAFETY_DESTRUCTIVE_COMMAND" \
+    "Blocked find -delete / find -exec rm." \
+    "Run the command manually only after validating its exact targets."
 fi
 
 # Block git clean -fdx (wipes untracked + ignored files)
 if echo "$COMMAND" | grep -qE 'git\s+clean\s+.*-[a-z]*[fx][a-z]*'; then
-  deny "Blocked 'git clean -f/-x'. Wipes untracked/ignored files. If intentional, run manually."
+  deny "SAFETY_DESTRUCTIVE_COMMAND" \
+    "Blocked git clean with force or ignored-file removal; it can wipe untracked or ignored files." \
+    "Inspect the candidate paths and run the command manually only if intentional."
 fi
 
 # Block database destruction
 if echo "$COMMAND" | grep -qiE 'DROP\s+(TABLE|DATABASE)|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\S+\s*;?\s*$'; then
-  deny "Blocked destructive database command. If intentional, run manually."
+  deny "SAFETY_DESTRUCTIVE_COMMAND" \
+    "Blocked destructive database command." \
+    "Validate the target, backup, and recovery path, then run it manually if intentional."
 fi
 
 # Block force pushes and hard resets against shared refs
-if echo "$COMMAND" | grep -qE 'git\s+push\s+.*--force|git\s+push\s+-f\b|git\s+reset\s+--hard\b'; then
-  deny "Blocked force push or hard reset. If intentional, run manually."
+if echo "$COMMAND" | grep -qE 'git\s+push\s+.*--force|git\s+push\s+-f([[:space:]]|$)|git\s+reset\s+--hard([[:space:]]|$)'; then
+  deny "SAFETY_DESTRUCTIVE_COMMAND" \
+    "Blocked force push or hard reset." \
+    "Use a recoverable Git operation, or run manually after confirming the affected refs."
 fi
 
 # Block .env file reads (credential exposure).
 # Match `.env` as a standalone token — NOT `.env.example`, `.environment`, etc.
 # After `.env` we require end-of-string, whitespace, or a shell metachar.
 if echo "$COMMAND" | grep -qE '(^|[[:space:];&|])(cat|less|head|tail|more|source|grep|sed|awk|bat)([[:space:]][^;&|>]*)?[[:space:]]([^[:space:];&|>]*/)?\.env([[:space:];&|>]|$)|echo.*\$\(.*([^[:space:];&|>]*/)?\.env([[:space:];&|>]|$)'; then
-  deny "Blocked .env file access. Credentials should not be read by the agent."
+  deny "SAFETY_PATH_VIOLATION" \
+    "Blocked .env file access because it can expose credentials." \
+    "Use documented variable names or a redacted example instead of reading secrets."
 fi
 
 exit 0

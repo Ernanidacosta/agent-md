@@ -8,6 +8,9 @@
 # Handles untracked files: `git diff` sees nothing on a brand-new file,
 # so we fall back to scanning the whole file for export-like lines.
 
+# shellcheck source=.claude/hooks/_lib.sh
+. "$(dirname "$0")/_lib.sh"
+
 INPUT=$(cat)
 
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty')
@@ -77,6 +80,11 @@ for C in "${CANDIDATES[@]}"; do
   fi
 done
 
-MSG="TDD check: new export(s) in $FILE_PATH but no matching test file found. Per Red-Green TDD: write the failing test first, then the implementation. If this is refactor-only, note it in memory/progress.md."
+RESULT=$(policy_result_json \
+  "warn" "warning" "QUALITY_TDD_COVERAGE_RECOMMENDED" \
+  "New export(s) in ${FILE_PATH}, but no matching test file was found." \
+  "Follow Red-Green TDD, or record why the change is refactor-only in memory/progress.md." \
+  "$FILE_PATH")
+MSG=$(policy_human_message "$RESULT")
 jq -n --arg m "$MSG" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $m}}'
 exit 0

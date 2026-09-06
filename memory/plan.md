@@ -1,31 +1,27 @@
-# Macro Plan
-
-The architectural design. Updated when direction changes. Vertical slices
-only — build full-stack features end-to-end, not horizontal layers
-(all DBs, then all APIs, then all UIs).
+# Current Plan
 
 ## Current Phase
 
-<!-- e.g. "Phase 2: Auth flow" -->
+Policy Foundation is implemented and verified. This phase adds shared
+policy vocabulary and documentation, not a policy engine.
 
-## Vertical Slices
+## Implementation Slices
 
-<!--
-One slice = one user-facing outcome, built top-to-bottom.
-Add slices as you plan them. Execute one at a time.
-
-### Slice 1: <user-facing outcome>
-- **UI**: what the user sees/clicks
-- **API**: routes/handlers needed
-- **Data**: schema changes, migrations
-- **Tests**: what proves it works
-- **Verify**: how the human confirms (link to memory/verify.md criteria)
--->
+1. [x] Make normative priorities and architectural non-goals explicit.
+2. [x] Add the shared structured result, severity model, and stable codes.
+3. [x] Adapt existing controls without changing Claude/Codex envelopes.
+4. [x] Add policy and adversarial classifier coverage; document known
+   TOML, glob, and mtime limitations.
+5. [x] Complete the full acceptance matrix and operational handoff.
 
 ## Deferred / Out of Scope
 
-<!-- What we are explicitly NOT building right now. Prevents scope creep. -->
+- Policy profiles, autonomy modes, risk or decision engines.
+- Task-scope enforcement and a new progress state machine.
+- Broad self-test or new independent-verification machinery.
+- ICM daemon/API coupling, semantic change detection, or new historical
+  memory storage.
 
 ## Open Questions
 
-<!-- Ambiguities that must be resolved with the human before implementation. -->
+None.

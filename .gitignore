@@ -1,0 +1,8 @@
+# This repository deliberately versions its own deterministic policy and
+# clean installation templates, even when a developer's global ignore file
+# excludes agent-md artifacts.
+!/agent-md.toml
+!/.agent-md/
+!/.agent-md/templates/
+!/.agent-md/templates/memory/
+!/.agent-md/templates/memory/*.md

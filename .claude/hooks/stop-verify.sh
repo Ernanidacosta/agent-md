@@ -102,12 +102,22 @@ fi
 if [ -n "$ERRORS" ]; then
   SUMMARY=$(printf 'Verification failed (%d checks ran). Fix these errors before completing:\n\n%s' \
     "$CHECKS_RUN" "$ERRORS")
-  jq -n --arg r "$SUMMARY" '{decision: "block", reason: $r}'
+  RESULT=$(policy_result_json \
+    "fail" "error" "VERIFY_REQUIRED_FAILED" \
+    "$SUMMARY" \
+    "Fix the reported required checks and run verification again.")
+  REASON=$(policy_human_message "$RESULT")
+  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
   exit 0
 fi
 
 if [ "$CHECKS_RUN" -eq 0 ]; then
-  jq -n '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: "No type-checker, linter, or test suite detected. Task completion is unverified. State this to the user, or add an agent-md.toml to declare verification commands."}}'
+  RESULT=$(policy_result_json \
+    "warn" "warning" "VERIFY_NOT_CONFIGURED" \
+    "No type-checker, linter, or test suite was detected; task completion is unverified." \
+    "State this to the user, or add agent-md.toml verification commands.")
+  MESSAGE=$(policy_human_message "$RESULT")
+  jq -n --arg m "$MESSAGE" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
   exit 0
 fi
 

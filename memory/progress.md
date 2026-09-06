@@ -1,29 +1,29 @@
-# Atomic Progress Log
+# Operational Progress
 
-Your temporal anchor. Tick atomic tasks as you complete them. Never mark a
-task done unless `memory/verify.md` criteria are met.
-
-The `state-enforcement.sh` hook blocks task completion if source files
-changed but this file wasn't updated.
+Current task state, not a historical journal. Keep at most five recent
+completed outcomes.
 
 ## In Progress
 
-- [ ] <!-- current atomic task — only one at a time -->
+None.
 
-## Completed (this session)
+## Recently Completed
 
-<!--
-- [x] <task> — <one-line note on what was verified>
--->
+- [x] Added the shared result contract with status, severity, stable code,
+  recovery guidance, and contextual paths.
+- [x] Classified existing Safety, Integrity, Quality, and Diagnostic
+  controls while preserving Claude/Codex hook protocols.
+- [x] Documented normative priorities, fail-closed behavior, non-goals,
+  and known parser/glob/mtime reliability limits.
+- [x] Preserved the prior configurable classifier, idempotent hook merge,
+  optional ICM boundary, and separate installation templates.
+- [x] Completed acceptance: Bats 103/103, ShellCheck, JSON/TOML/static
+  checks, Claude/Codex smoke, doctor, and agent-md-verify passed.
 
-## Backlog (next up)
+## Next Steps
 
-<!--
-- [ ] <task>
--->
+None; awaiting human review.
 
 ## Blocked
 
-<!--
-- [ ] <task> — waiting on: <reason or person>
--->
+None.

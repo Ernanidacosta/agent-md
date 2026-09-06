@@ -7,10 +7,15 @@ setup_repo() {
   export REPO_DIR
   cp -r "$BATS_TEST_DIRNAME/../.claude" "$REPO_DIR/"
   cp -r "$BATS_TEST_DIRNAME/../.codex" "$REPO_DIR/" 2>/dev/null || true
+  cp -r "$BATS_TEST_DIRNAME/../.githooks" "$REPO_DIR/" 2>/dev/null || true
   cd "$REPO_DIR"
   git init -q
   git config user.email t@t
   git config user.name t
+  # Tests must not inherit a developer's global ignore rules. In
+  # particular, a global `memory/` entry makes progress.md impossible to
+  # stage and hides the behavior these fixtures are meant to exercise.
+  git config core.excludesFile /dev/null
 }
 
 teardown_repo() {

@@ -1,10 +1,11 @@
 # agent-md.toml — explicit configuration for agent-md hooks.
 #
-# Copy to the repo root as `agent-md.toml` to override the heuristic
-# tool detection in .claude/hooks/* and .githooks/pre-commit. Anything
-# you leave unset falls back to the heuristic default.
+# Copy to the repo root as `agent-md.toml` to configure verification,
+# operational-change detection, and optional integrations. Anything you
+# leave unset falls back to the heuristic default.
 #
-# Values must be simple strings on a single line. `#` starts a comment.
+# Verification values must be simple strings on a single line. State
+# globs are arrays of quoted strings and may span multiple lines.
 
 [verify]
 # Project-wide type-check command. Runs at Stop and at pre-commit.
@@ -55,3 +56,29 @@
 # Max age of an artifact (seconds) before it's considered stale.
 # Applies to both the markdown note and the image it references.
 # freshness_seconds = 3600
+
+[state]
+# Operationally relevant paths. If omitted, agent-md uses broad defaults
+# for common source/test directories and executable code extensions.
+# Declaring this key replaces the default source list.
+# source_globs = [
+#   "src/**",
+#   "app/**",
+#   "tests/**",
+#   "*.py",
+# ]
+
+# Paths that never require a progress update. Ignore wins over source.
+# Declaring this key replaces the default ignore list. scripts/** and
+# tools/** are intentionally NOT ignored by default because they often
+# contain executable product code.
+# ignore_globs = [
+#   "docs/**",
+#   ".ai-memory.toml",
+#   ".gitignore",
+# ]
+
+[integrations.icm]
+# Declares that ICM supplies optional semantic/historical recall. This
+# never makes hooks or the agent-md runtime call or depend on ICM.
+# enabled = false

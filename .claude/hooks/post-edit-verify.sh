@@ -73,8 +73,12 @@ fi
 
 if [ -n "$ERRORS" ]; then
   TRUNCATED=$(printf '%s' "$ERRORS" | head -50)
-  REASON="Lint failed. Fix before continuing:
-${TRUNCATED}"
+  RESULT=$(policy_result_json \
+    "fail" "error" "VERIFY_REQUIRED_FAILED" \
+    "Lint failed for the edited file:\n${TRUNCATED}" \
+    "Fix the reported lint errors before continuing." \
+    "$FILE_PATH")
+  REASON=$(policy_human_message "$RESULT")
   jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
   exit 0
 fi

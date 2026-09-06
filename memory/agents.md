@@ -1,61 +1,31 @@
-# Sub-Agents & Tooling Registry
+# Agents & Tooling
 
-Update this file when sub-agents, MCPs, or core dependencies change.
-Read at every session start.
+## Active Agents
 
-## Active Sub-Agents
+- Codex — implementation, repository verification, and handoff.
 
-<!--
-List each sub-agent the orchestrator may delegate to. Example:
+## Integrations
 
-- **general-purpose** — research, multi-file search, open-ended questions
-- **code-reviewer** — second-opinion reviews before merging
-- **explorer** — fast codebase mapping for unfamiliar directories
--->
-
-## MCPs / External Services
-
-<!--
-List MCP servers or external tools the agent can invoke. Example:
-
-- Playwright — visual validation (screenshots, click automation)
-- Anthropic API — VLM for screenshot review
-- Postgres MCP — read-only DB introspection
--->
+- ICM — optional semantic/historical recall; enabled declaratively for
+  this fork and never required by agent-md hooks or runtime.
+- Git — factual source of truth for code and code history.
 
 ## Tech Stack
 
-<!--
-Runtime, language, framework, version. Example:
+- Runtime: Bash plus standard Unix tools, Git, and jq.
+- Tests: Bats.
+- Lint: ShellCheck.
+- Static checks: JSON validation, directive alias comparison, policy
+  grep, and installer smoke tests.
 
-- Runtime: Node 20+
-- Language: TypeScript 5.8 (strict, erasableSyntaxOnly)
-- Framework: Next.js 14 (app router)
-- Test: Vitest
-- Lint: eslint + ruff
-- Type-check: tsc --noEmit
--->
+## Constraints
 
-## Agent Runtime Policy
-
-<!--
-Use this when the project itself builds with AI APIs or model routing.
-Example:
-
-- Default model / effort: <routine execution choice>
-- Expensive reasoning reserved for: <architecture, high-risk changes, debugging>
-- Context policy: <what gets loaded, summarized, cached, or excluded>
-- Tool result contract: <JSON schema, key-value format, or validation rule>
-- Retry / fallback policy: <if API-backed tools are part of the app>
--->
-
-## Forbidden Patterns
-
-<!--
-Project-specific patterns this agent must not introduce. Example:
-
-- No `any` types. Use `unknown` + type guards.
-- No dynamic imports. Static imports only.
-- No default exports on shared utilities.
-- No silent catches. Errors hard-crash or are explicitly re-thrown.
--->
+- Apply the normative order: Safety, Correctness, Reliability,
+  Maintainability, Minimal surface area, then Speed.
+- Enforce deterministic facts and invariants; keep subjective judgment
+  advisory.
+- Never downgrade an `error` or `fatal` result to release execution.
+- Keep shell hooks dependency-light and deterministic.
+- Preserve third-party Claude and Codex hooks during installation.
+- Keep root `memory/` operational; installation templates live only in
+  `.agent-md/templates/memory/`.

@@ -1,0 +1,28 @@
+# Verification and state policy for the agent-md repository itself.
+
+[verify]
+lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh .githooks/pre-commit install.sh"
+test = "bats tests/"
+
+[state]
+source_globs = [
+  ".agent-md/bin/**",
+  ".claude/hooks/**",
+  ".codex/hooks/**",
+  ".githooks/**",
+  "install.sh",
+  "tests/**",
+]
+ignore_globs = [
+  ".agent/**",
+  ".github/**",
+  ".ai-memory.toml",
+  ".gitignore",
+  "agent-md.toml",
+  "agent-md.toml.example",
+  "memory/**",
+  "*.md",
+]
+
+[integrations.icm]
+enabled = true

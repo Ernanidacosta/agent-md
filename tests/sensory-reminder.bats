@@ -16,6 +16,10 @@ teardown() { teardown_repo; }
   echo "<div/>" > App.tsx
   out=$(run_hook sensory-reminder.sh '{"stop_hook_active":false}')
   echo "$out" | jq -e '.hookSpecificOutput.additionalContext' > /dev/null
+  echo "$out" | jq -e '
+    .hookSpecificOutput.additionalContext |
+    test("WARNING QUALITY_VISUAL_EVIDENCE_RECOMMENDED")
+  ' > /dev/null
 }
 
 @test "blocks when required=true and no artifact exists" {
@@ -28,6 +32,7 @@ EOF
   echo "<div/>" > App.tsx
   out=$(run_hook sensory-reminder.sh '{"stop_hook_active":false}')
   echo "$out" | jq -e '.decision == "block"' > /dev/null
+  echo "$out" | jq -e '.reason | test("ERROR VERIFY_REQUIRED_FAILED")' > /dev/null
 }
 
 @test "blocks when required=true and only an image exists (no markdown)" {
