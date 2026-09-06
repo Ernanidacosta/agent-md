@@ -165,10 +165,16 @@ fi
 # include _lib.sh; the fallback warning only covers manually copied legacy
 # pre-commit hooks.
 if [ "$SHARED_STATE_AVAILABLE" -eq 1 ]; then
-  STATE_REASON=$(state_enforcement_reason staged)
-  if [ -n "$STATE_REASON" ]; then
-    err "$STATE_REASON"
-    FAIL=1
+  STATE_RESULT=$(state_enforcement_result staged)
+  if [ -n "$STATE_RESULT" ]; then
+    STATE_STATUS=$(printf '%s' "$STATE_RESULT" | jq -r '.status')
+    STATE_MESSAGE=$(policy_human_message "$STATE_RESULT")
+    if [ "$STATE_STATUS" = "fail" ]; then
+      err "$STATE_MESSAGE"
+      FAIL=1
+    else
+      log "$STATE_MESSAGE"
+    fi
   else
     ok "operational state up to date"
   fi

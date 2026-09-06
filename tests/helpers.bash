@@ -18,6 +18,22 @@ setup_repo() {
   git config core.excludesFile /dev/null
 }
 
+write_progress() {
+  local progress_status="$1" task="${2:-}" scope_globs="${3:-}"
+  mkdir -p memory
+  {
+    printf '# Progress\n\n## Current\n\nStatus: %s\n' "$progress_status"
+    [ -z "$task" ] || printf 'Task: %s\n' "$task"
+    if [ -n "$scope_globs" ]; then
+      printf '\n## Scope\n\n'
+      while IFS= read -r scope_glob; do
+        [ -z "$scope_glob" ] || printf -- '- %s\n' "$scope_glob"
+      done <<< "$scope_globs"
+    fi
+    printf '\n## Next\n\nNone\n\n## Blockers\n\nNone\n\n## Recently Completed\n\nNone\n'
+  } > memory/progress.md
+}
+
 teardown_repo() {
   # shellcheck disable=SC2164
   cd "$BATS_TEST_DIRNAME"

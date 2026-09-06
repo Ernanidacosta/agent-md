@@ -9,7 +9,7 @@ when configured, the project's semantic memory provider.
 
 ## Implementation Slices
 
-<!-- Small vertical slices with their acceptance criteria. -->
+<!-- One behavioral objective per slice, with evidence and verification. -->
 
 ## Deferred / Out of Scope
 

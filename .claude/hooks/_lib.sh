@@ -323,14 +323,241 @@ filter_operationally_relevant_files() {
   done
 }
 
-# state_enforcement_result [worktree|staged] — emits a structured failure
-# when an Integrity invariant is violated. Prints nothing on success.
+# validate_progress_content <markdown>
+# Validates the deliberately small operational-state format. This is a
+# line-oriented contract checker, not a general Markdown parser.
+validate_progress_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function fail(message) {
+      if (!bad) print message
+      bad = 1
+    }
+    function body_item(line, section_name) {
+      if (line == "None") return 1
+      if (line ~ /^- [^[:space:]]/) return 1
+      fail(section_name " must contain list items or the literal None.")
+      return 0
+    }
+
+    BEGIN { stage = 0; section = "preamble" }
+
+    /^<!--/ { if ($0 !~ /-->/) in_comment = 1; next }
+    in_comment { if ($0 ~ /-->/) in_comment = 0; next }
+
+    /^# / {
+      h1_count++
+      if ($0 != "# Progress") fail("The document must start with exactly # Progress.")
+      next
+    }
+
+    /^## / {
+      heading = substr($0, 4)
+      if (heading == "Current") {
+        current_count++
+        if (stage != 0) fail("## Current must be the first section.")
+        stage = 1; section = "current"
+      } else if (heading == "Scope") {
+        scope_count++
+        if (stage != 1) fail("Optional ## Scope must follow ## Current.")
+        stage = 2; section = "scope"
+      } else if (heading == "Next") {
+        next_count++
+        if (stage != 1 && stage != 2) fail("## Next must follow ## Current or ## Scope.")
+        stage = 3; section = "next"
+      } else if (heading == "Blockers") {
+        blockers_count++
+        if (stage != 3) fail("## Blockers must follow ## Next.")
+        stage = 4; section = "blockers"
+      } else if (heading == "Recently Completed") {
+        recent_section_count++
+        if (stage != 4) fail("## Recently Completed must follow ## Blockers.")
+        stage = 5; section = "recent"
+      } else {
+        fail("Unknown progress section: ## " heading ".")
+        section = "unknown"
+      }
+      next
+    }
+
+    /^[[:space:]]*$/ { next }
+
+    {
+      if (section == "current") {
+        if ($0 ~ /^Status:/) {
+          status_count++
+          status_value = trim(substr($0, 8))
+        } else if ($0 ~ /^Task:/) {
+          task_count++
+          task_value = trim(substr($0, 6))
+        } else {
+          fail("## Current accepts only Status and Task fields.")
+        }
+      } else if (section == "scope") {
+        if ($0 ~ /^- [^[:space:]]/) scope_item_count++
+        else fail("## Scope must contain non-empty list items.")
+      } else if (section == "next") {
+        if (body_item($0, "## Next")) next_item_count++
+      } else if (section == "blockers") {
+        if (body_item($0, "## Blockers")) blocker_item_count++
+      } else if (section == "recent") {
+        if (body_item($0, "## Recently Completed")) {
+          recent_body_count++
+          if ($0 ~ /^- /) recent_item_count++
+        }
+      } else if (section == "preamble") {
+        fail("Only blank lines are allowed before ## Current.")
+      } else {
+        fail("Content appears under an invalid progress section.")
+      }
+    }
+
+    END {
+      if (h1_count != 1) fail("The document must contain exactly one # Progress heading.")
+      if (current_count != 1 || next_count != 1 || blockers_count != 1 || recent_section_count != 1 || stage != 5)
+        fail("Required sections are ## Current, optional ## Scope, ## Next, ## Blockers, and ## Recently Completed in that order.")
+      if (scope_count > 1) fail("The document may contain at most one ## Scope section.")
+      if (status_count != 1) fail("## Current must contain exactly one Status field.")
+      if (status_value !~ /^(planned|active|blocked|verifying|done)$/)
+        fail("Status must be planned, active, blocked, verifying, or done.")
+      if (task_count > 1) fail("## Current may contain at most one Task field.")
+      if (status_value ~ /^(active|blocked|verifying)$/ && (task_count != 1 || task_value == ""))
+        fail("Task is required when Status is active, blocked, or verifying.")
+      if (scope_count == 1 && scope_item_count == 0) fail("Remove an empty ## Scope section or add at least one path glob.")
+      if (next_item_count == 0) fail("## Next must explicitly contain list items or None.")
+      if (blocker_item_count == 0) fail("## Blockers must explicitly contain list items or None.")
+      if (recent_body_count == 0) fail("## Recently Completed must explicitly contain list items or None.")
+      if (recent_item_count > 5) fail("## Recently Completed may contain at most five items.")
+      exit (bad ? 1 : 0)
+    }
+  '
+}
+
+progress_status_from_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    /^## Current$/ { current = 1; next }
+    /^## / { current = 0 }
+    current && /^Status:/ {
+      value = substr($0, 8)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print value
+      exit
+    }
+  '
+}
+
+progress_scope_from_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    /^## Scope$/ { scope = 1; next }
+    /^## / { scope = 0 }
+    scope && /^- [^[:space:]]/ { print substr($0, 3) }
+  '
+}
+
+progress_transition_allowed() {
+  local previous="$1" current="$2"
+  [ "$previous" = "$current" ] && return 0
+  case "${previous}:${current}" in
+    planned:active|active:blocked|active:verifying|blocked:active|\
+    verifying:active|verifying:done|done:planned|done:active) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+state_file_snapshot() {
+  local path="$1" scope="${2:-worktree}"
+  if [ "$scope" = "staged" ] \
+     && git ls-files --cached --error-unmatch "$path" &>/dev/null; then
+    git show ":${path}" 2>/dev/null
+  elif [ -f "$path" ]; then
+    cat "$path"
+  fi
+}
+
+validate_gotchas_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    function fail(code, message) {
+      if (!bad) print code "|" message
+      bad = 1
+    }
+    function finish_item() {
+      if (!in_item) return
+      if (rule_count == 0) fail("STATE_GOTCHA_RULE_MISSING", "Gotcha " title " is missing a required Rule field.")
+      else if (rule_count > 1) fail("STATE_GOTCHA_INVALID", "Gotcha " title " has multiple Rule fields.")
+      else if (why_count != 1) fail("STATE_GOTCHA_INVALID", "Gotcha " title " must contain exactly one non-empty Why field.")
+    }
+
+    /^<!--/ { if ($0 !~ /-->/) in_comment = 1; next }
+    in_comment { if ($0 ~ /-->/) in_comment = 0; next }
+
+    /^# / {
+      h1_count++
+      if ($0 != "# Active Gotchas") fail("STATE_GOTCHA_INVALID", "The document must start with # Active Gotchas.")
+      next
+    }
+
+    /^## / {
+      finish_item()
+      title = substr($0, 4)
+      if (trim(title) == "") fail("STATE_GOTCHA_INVALID", "Gotcha headings must be non-empty.")
+      in_item = 1
+      item_count++
+      rule_count = 0
+      why_count = 0
+      next
+    }
+
+    in_item && /^\*\*Rule(:\*\*|\*\*:)/ {
+      value = $0
+      sub(/^\*\*Rule:\*\*[[:space:]]*/, "", value)
+      sub(/^\*\*Rule\*\*:[[:space:]]*/, "", value)
+      rule_count++
+      if (trim(value) == "") fail("STATE_GOTCHA_RULE_MISSING", "Gotcha " title " has an empty Rule field.")
+      next
+    }
+
+    in_item && /^\*\*Why(:\*\*|\*\*:)/ {
+      value = $0
+      sub(/^\*\*Why:\*\*[[:space:]]*/, "", value)
+      sub(/^\*\*Why\*\*:[[:space:]]*/, "", value)
+      why_count++
+      if (trim(value) == "") fail("STATE_GOTCHA_INVALID", "Gotcha " title " has an empty Why field.")
+      next
+    }
+
+    !in_item && /^- / {
+      fail("STATE_GOTCHA_RULE_MISSING", "Gotcha entries must use ## headings and include Rule and Why fields.")
+    }
+
+    END {
+      finish_item()
+      if (h1_count != 1) fail("STATE_GOTCHA_INVALID", "The document must contain exactly one # Active Gotchas heading.")
+      exit (bad ? 1 : 0)
+    }
+  '
+}
+
+# state_enforcement_result [worktree|staged] — emits one structured result:
+# the highest-priority Integrity failure, otherwise a Quality scope warning.
+# Prints nothing when no action is needed.
 state_enforcement_result() {
   local scope="${1:-worktree}"
   git rev-parse --is-inside-work-tree &>/dev/null || return 0
 
-  local modified_files relevant_files relevant_count progress_changed
-  local gotchas_diff gotchas_changed gotchas_rules
+  local modified_files relevant_files relevant_count progress_changed gotchas_changed
+  local progress_content progress_error previous_content previous_status current_status
+  local gotchas_content gotchas_error gotchas_code gotchas_message
 
   if [ -f "memory/progress.md" ]; then
     if ! load_state_globs; then
@@ -344,27 +571,20 @@ state_enforcement_result() {
 
   modified_files=$(changed_files "$scope")
 
-  # A correction must become a reusable rule, not merely a historical note.
-  # This only applies when gotchas changed; ordinary source work does not
-  # need a new gotcha entry.
-  if [ "$scope" = "staged" ]; then
-    gotchas_diff=$(git diff --cached -- memory/gotchas.md 2>/dev/null)
-  else
-    gotchas_diff=$( {
-      git diff -- memory/gotchas.md 2>/dev/null
-      git diff --cached -- memory/gotchas.md 2>/dev/null
-    } )
-  fi
-  gotchas_changed=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+[^+]' || true)
-  gotchas_rules=$(printf '%s\n' "$gotchas_diff" | grep -cE '^\+.*\*\*Rule\*\*:' || true)
-
-  if [ "$gotchas_changed" -gt 0 ] && [ "$gotchas_rules" -eq 0 ]; then
-    policy_result_json \
-      "fail" "error" "STATE_GOTCHA_RULE_MISSING" \
-      "memory/gotchas.md changed without an explicit **Rule**." \
-      "Convert the recorded failure into a concrete prevention rule before finishing." \
-      "memory/gotchas.md"
-    return 0
+  gotchas_changed=$(printf '%s\n' "$modified_files" | grep -c '^memory/gotchas\.md$' || true)
+  gotchas_changed=${gotchas_changed:-0}
+  if [ "$gotchas_changed" -gt 0 ]; then
+    gotchas_content=$(state_file_snapshot memory/gotchas.md "$scope")
+    if [ -n "$gotchas_content" ] && ! gotchas_error=$(validate_gotchas_content "$gotchas_content"); then
+      gotchas_code=${gotchas_error%%|*}
+      gotchas_message=${gotchas_error#*|}
+      policy_result_json \
+        "fail" "error" "$gotchas_code" \
+        "$gotchas_message" \
+        "Keep only reusable gotchas and add non-empty Rule and Why fields." \
+        "memory/gotchas.md"
+      return 0
+    fi
   fi
 
   [ -f "memory/progress.md" ] || return 0
@@ -372,10 +592,39 @@ state_enforcement_result() {
   relevant_files=$(printf '%s\n' "$modified_files" | filter_operationally_relevant_files)
   relevant_count=$(printf '%s\n' "$relevant_files" | grep -c . || true)
   relevant_count=${relevant_count:-0}
-  [ "$relevant_count" -eq 0 ] && return 0
-
   progress_changed=$(printf '%s\n' "$modified_files" | grep -c '^memory/progress\.md$' || true)
   progress_changed=${progress_changed:-0}
+
+  if [ "$relevant_count" -gt 0 ] || [ "$progress_changed" -gt 0 ]; then
+    progress_content=$(state_file_snapshot memory/progress.md "$scope")
+    if ! progress_error=$(validate_progress_content "$progress_content"); then
+      policy_result_json \
+        "fail" "error" "STATE_PROGRESS_INVALID" \
+        "$progress_error" \
+        "Restore the documented progress.md structure before continuing." \
+        "memory/progress.md"
+      return 0
+    fi
+
+    if [ "$progress_changed" -gt 0 ]; then
+      previous_content=$(git show HEAD:memory/progress.md 2>/dev/null || true)
+      if [ -n "$previous_content" ] \
+         && validate_progress_content "$previous_content" >/dev/null 2>&1; then
+        previous_status=$(progress_status_from_content "$previous_content")
+        current_status=$(progress_status_from_content "$progress_content")
+        if ! progress_transition_allowed "$previous_status" "$current_status"; then
+          policy_result_json \
+            "warn" "warning" "STATE_TRANSITION_INVALID" \
+            "The observed progress status change from ${previous_status} to ${current_status} is not a declared direct transition." \
+            "Review the transition or capture the required intermediate operational state." \
+            "memory/progress.md"
+          return 0
+        fi
+      fi
+    fi
+  fi
+
+  [ "$relevant_count" -eq 0 ] && return 0
 
   # Repos may gitignore memory/ (e.g. a global ~/.gitignore excluding it).
   # git diff/ls-files never sees those edits, so progress_changed would be
@@ -415,15 +664,47 @@ EOF
       "${relevant_count} operationally relevant file(s) changed but memory/progress.md was not updated." \
       "Update memory/progress.md to reflect the current task state before finishing." \
       "$paths"
+    return 0
+  fi
+
+  local task_scope_globs out_of_scope_files out_of_scope_count file
+  task_scope_globs=$(progress_scope_from_content "$progress_content")
+  [ -n "$task_scope_globs" ] || return 0
+
+  out_of_scope_files=""
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if ! path_matches_globs "$file" "$task_scope_globs"; then
+      if [ -n "$out_of_scope_files" ]; then
+        out_of_scope_files="${out_of_scope_files}
+${file}"
+      else
+        out_of_scope_files="$file"
+      fi
+    fi
+  done <<EOF
+$relevant_files
+EOF
+
+  out_of_scope_count=$(printf '%s\n' "$out_of_scope_files" | grep -c . || true)
+  out_of_scope_count=${out_of_scope_count:-0}
+  if [ "$out_of_scope_count" -gt 0 ]; then
+    policy_result_json \
+      "warn" "warning" "QUALITY_OUT_OF_SCOPE_CHANGE" \
+      "${out_of_scope_count} operationally relevant file(s) changed outside the declared task Scope." \
+      "Review whether Scope or the implementation plan should be adjusted; Scope is not a safety boundary." \
+      "$out_of_scope_files"
   fi
 }
 
 # state_enforcement_reason [worktree|staged] — backward-compatible human
 # adapter used by Claude/Codex Stop hooks and the pre-commit fallback.
 state_enforcement_reason() {
-  local result
+  local result result_status
   result=$(state_enforcement_result "${1:-worktree}")
-  [ -z "$result" ] || policy_human_message "$result"
+  [ -n "$result" ] || return 0
+  result_status=$(printf '%s' "$result" | jq -r '.status')
+  [ "$result_status" = "fail" ] && policy_human_message "$result"
 }
 
 # Backward-compatible name used by existing Stop wrappers and downstream

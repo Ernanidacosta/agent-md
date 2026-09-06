@@ -1,29 +1,28 @@
-# Operational Progress
+# Progress
 
-Current task state, not a historical journal. Keep at most five recent
-completed outcomes.
+## Current
 
-## In Progress
+Status: done
+Task: Formalize deterministic operational state and handoff.
 
-None.
+## Scope
+
+- .claude/hooks/**
+- .githooks/**
+- tests/**
+
+## Next
+
+None
+
+## Blockers
+
+None
 
 ## Recently Completed
 
-- [x] Added the shared result contract with status, severity, stable code,
-  recovery guidance, and contextual paths.
-- [x] Classified existing Safety, Integrity, Quality, and Diagnostic
-  controls while preserving Claude/Codex hook protocols.
-- [x] Documented normative priorities, fail-closed behavior, non-goals,
-  and known parser/glob/mtime reliability limits.
-- [x] Preserved the prior configurable classifier, idempotent hook merge,
-  optional ICM boundary, and separate installation templates.
-- [x] Completed acceptance: Bats 103/103, ShellCheck, JSON/TOML/static
-  checks, Claude/Codex smoke, doctor, and agent-md-verify passed.
-
-## Next Steps
-
-None; awaiting human review.
-
-## Blocked
-
-None.
+- Formalized progress validation, transition warnings, Scope warnings, structured gotchas, pruning, and handoff.
+- Established the shared policy result and severity contract.
+- Added configurable source classification shared by Stop and pre-commit.
+- Preserved third-party Claude and Codex hooks through idempotent merge.
+- Separated operational memory from clean installation templates.

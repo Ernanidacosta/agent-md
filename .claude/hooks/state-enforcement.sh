@@ -1,7 +1,7 @@
 #!/bin/bash
 # state-enforcement.sh
-# Stop hook: blocks task completion if operationally relevant files
-# changed but memory/progress.md was NOT updated.
+# Stop hook: validates operational state, blocks Integrity failures, and
+# reports out-of-scope Quality warnings without blocking.
 #
 # Skipped if memory/progress.md doesn't exist (memory system not
 # installed) or if we're not in a git repo.
@@ -13,10 +13,8 @@
 # Hook output contract: exit 0 + JSON block decision on stdout. Earlier
 # versions mixed JSON with exit 2, which Claude silently discarded.
 #
-# The actual staleness check lives in _lib.sh's progress_stale_reason —
-# shared with precompact-state-check.sh (same question, different
-# trigger and JSON shape) and with Codex's stop.sh, which invokes this
-# script directly (see .codex/hooks/stop.sh).
+# The state contract and classifier live in _lib.sh and are shared with
+# pre-commit and Codex's stop wrapper.
 
 # Read and discard stdin.
 cat > /dev/null
@@ -24,8 +22,14 @@ cat > /dev/null
 # shellcheck source=.claude/hooks/_lib.sh
 . "$(dirname "$0")/_lib.sh"
 
-REASON=$(state_enforcement_reason worktree)
-if [ -n "$REASON" ]; then
-  jq -n --arg r "$REASON" '{decision: "block", reason: $r}'
+RESULT=$(state_enforcement_result worktree)
+[ -n "$RESULT" ] || exit 0
+
+RESULT_STATUS=$(printf '%s' "$RESULT" | jq -r '.status')
+MESSAGE=$(policy_human_message "$RESULT")
+if [ "$RESULT_STATUS" = "fail" ]; then
+  jq -n --arg r "$MESSAGE" '{decision: "block", reason: $r}'
+else
+  jq -n --arg m "$MESSAGE" '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $m}}'
 fi
 exit 0

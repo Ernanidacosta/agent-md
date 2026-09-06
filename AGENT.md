@@ -52,19 +52,44 @@ when they exist and keep them accurate as work progresses.
 
 - `memory/agents.md` — active agents, MCPs, tech stack, tooling
 - `memory/plan.md` — current direction and implementation slices
-- `memory/progress.md` — current task, next steps, blockers, and up to
-  five recently completed outcomes
+- `memory/progress.md` — current status, one current task, optional scope,
+  next steps, blockers, and up to five recently completed outcomes
 - `memory/verify.md` — definition of done and required checks
 - `memory/gotchas.md` — prevention rules for traps that remain relevant
 
 If the files do not exist, initialize them before substantive work.
 Prune stale material instead of accumulating an infinite journal.
 
+`progress.md` uses one small, stable contract: `## Current` contains one
+`Status:` and at most one `Task:`; optional `## Scope` contains path-glob
+list items; `## Next` and `## Blockers` are explicit; and
+`## Recently Completed` has at most five items. Allowed statuses are
+`planned`, `active`, `blocked`, `verifying`, and `done`. A task is
+required for `active`, `blocked`, and `verifying`.
+
+Allowed status transitions are `planned -> active`, `active -> blocked`,
+`active -> verifying`, `blocked -> active`, `verifying -> active`,
+`verifying -> done`, `done -> planned`, and `done -> active`. Unchanged
+status is not a transition. Git supplies the previous factual status
+when one is available. An observed non-direct transition warns rather
+than blocks because Git cannot prove that no uncommitted intermediate
+state existed; do not add hidden persistence to guess.
+
+`Scope` is a focus-control signal, not a sandbox or safety boundary.
+Out-of-scope operational changes produce a warning. Scope never replaces
+safety hooks, path protections, Git permissions, host sandboxing, or
+human approval for critical actions. If Scope is absent, do not infer it.
+
 When `agent-md.toml` declares `[integrations.icm] enabled = true`, use
 the available ICM integration for historical or cross-agent recall when
 needed. Do not copy recalled history wholesale into `memory/`; keep only
 the operational consequence that affects current work. Never require ICM
 for agent-md hooks, verification, safety, or task completion.
+
+Operational handoff depends first on `progress.md`, `plan.md`,
+`verify.md`, `gotchas.md`, and Git. ICM may enrich historical context but
+must not be necessary to determine current status, remaining work,
+blockers, or the next step.
 
 ### Architectural Non-Goals
 
@@ -105,7 +130,8 @@ Plan in this order:
 1. **Context** — map the relevant code and existing patterns.
 2. **Questions** — surface ambiguous requirements and tradeoffs.
 3. **Structure** — update `memory/plan.md` and `memory/verify.md`.
-4. **Tasks** — add atomic steps to `memory/progress.md`.
+4. **Tasks** — set the current status/task and immediate next steps in
+   `memory/progress.md`.
 5. **Execution** — implement the next bounded slice.
 
 For obvious one- or two-line fixes, execute directly and verify.
@@ -122,8 +148,10 @@ implementation pass bounded.
 
 - Execute one small vertical slice at a time.
 - Avoid broad refactors mixed with feature work.
-- Keep a phase to roughly five touched files unless the change is purely
-  mechanical.
+- One behavioral objective per implementation slice. Twenty mechanical
+  files may be one coherent change; two files may contain a huge
+  refactor. Control the slice by objective, evidence, and verification,
+  not file count.
 - For large independent areas, split the work and verify each area
   separately.
 
@@ -158,17 +186,21 @@ like a template.
 
 ---
 
-## 7. Test-Driven Changes
+## 7. Evidence-First Changes
 
-For bug fixes and new behavior:
+Before implementing or correcting behavior:
 
-1. Add or identify a test that should fail.
-2. Run it and observe the failure.
-3. Write the smallest implementation that turns it green.
-4. Refactor only after the test passes.
+1. Establish reproducible evidence of the baseline or failure: a unit or
+   integration test, CLI exit code, HTTP response, smoke test, log
+   assertion, snapshot, or visual artifact.
+2. Observe the current or failing behavior.
+3. Implement the smallest change.
+4. Repeat the same evidence.
+5. Run regression checks.
 
-The `tdd-check.sh` hook can warn on new exports without nearby tests.
-It is a nudge, not proof of test-first ordering.
+TDD remains preferred when it is cheap and applicable. The
+`tdd-check.sh` hook is a quality nudge, not proof of ordering. Never
+claim completion from inspection alone or reduce required verification.
 
 ---
 
@@ -205,13 +237,15 @@ Use:
 
 ## 9. Edit Safety
 
-- Re-read a file before editing it, and re-read after editing.
-- On rename or signature changes, search separately for direct calls,
-  type references, string literals, dynamic imports, `require()` calls,
-  re-exports, barrel files, and test mocks.
-- Never delete a file without verifying references first.
-- Before structural refactors in large files, remove only dead code that
-  is directly in the way or that your change creates.
+- Ensure you have the current working version before editing.
+- Edit, then Inspect the resulting diff or affected region.
+- Verify the affected behavior with reproducible evidence and regression
+  checks.
+- Before delete, rename, signature change, migration/schema change,
+  public API change, or structural refactor, search all relevant direct
+  calls, type references, string literals, dynamic imports, `require()`
+  calls, re-exports, barrel files, and test mocks. Confirm impact and a
+  safe recovery path before proceeding.
 
 ---
 
@@ -305,6 +339,9 @@ retry-count escape or automatic release for a real blocking result.
 - Keep at most five recently completed outcomes in `progress.md`. Remove
   superseded plan details and gotchas that no longer apply; Git and ICM,
   when enabled, retain the history.
+- Keep `plan.md` to the current direction, active phase, and decisions
+  still in force; `verify.md` to current checks and definition of done;
+  and `agents.md` to current agents, stack, MCPs, and tools.
 - For large files, read focused chunks instead of relying on one huge
   output.
 - If tool output is truncated, read the saved full output or rerun a
@@ -314,15 +351,15 @@ retry-count escape or automatic release for a real blocking result.
 
 ## 13. Self-Correction
 
-- After a correction from the human, add the pattern to
-  `memory/gotchas.md` only while the prevention rule remains relevant.
-- Each entry needs a `**Rule**:` line saying what to do differently next
-  time. An error log without one is a note, not a correction. The `Stop`
-  hook scans added lines in `memory/gotchas.md` for that literal marker
-  and blocks without it. `.githooks/pre-commit` checks the same thing,
-  but only in repos where `core.hooksPath` points at `.githooks`.
-- Evidence and a verification step make the rule checkable later. Not
-  enforced, but a rule you cannot re-test is a guess.
+- Add a gotcha only for a reusable invariant, recurring failure mode,
+  non-obvious project rule, or error with a real chance of recurrence.
+  Do not record every correction or use the file as a historical diary.
+- Each `##` entry requires non-empty `**Rule:**` and `**Why:**` fields.
+  `**Scope:**`, `**Evidence:**`, and `**Added:**` are recommended. Stop
+  and pre-commit validate changed gotchas; obsolete entries must be
+  removed.
+- Evidence and a verification step make a gotcha checkable later. A rule
+  that cannot be re-tested remains judgment, not proof.
 - If a fix fails twice, stop and re-read the relevant code top-down.
   Check upstream docs or vendored source before guessing again. State
   what assumption was wrong before trying again.

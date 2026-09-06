@@ -1,14 +1,18 @@
 # Active Gotchas
 
-Keep only traps that remain relevant to current work. Resolved historical
-incidents belong in Git and, when configured, semantic memory.
+Keep only reusable invariants, recurring failure modes, and non-obvious
+project rules with a real chance of recurrence. Remove obsolete entries;
+historical incidents belong in Git and optional semantic memory.
 
-Each entry must contain an explicit prevention rule:
-
-The placeholder escapes the colon so an empty template cannot satisfy
-the enforcement check. Replace `&#58;` with a literal colon in a real entry.
+Each entry uses this shape. `Rule` and `Why` are required; `Scope`,
+`Evidence`, and `Added` are recommended.
 
 <!--
-- **Date** — Mistake or failure.
-  **Rule**&#58; Concrete behavior that prevents recurrence.
+## Short invariant name
+
+**Rule&#58;** Concrete behavior that prevents recurrence.
+**Why&#58;** Failure mode prevented by the rule.
+**Scope&#58;** src/example/**
+**Evidence&#58;** relevant_test_name
+**Added&#58;** YYYY-MM
 -->

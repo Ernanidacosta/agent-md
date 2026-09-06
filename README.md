@@ -141,10 +141,14 @@ Stable codes currently emitted by controls are deliberately limited:
 | `SAFETY_DESTRUCTIVE_COMMAND` | Safety | `fatal` |
 | `SAFETY_PATH_VIOLATION` | Safety | `fatal` |
 | `CONFIG_INVALID` | Integrity | `error` |
+| `STATE_PROGRESS_INVALID` | Integrity | `error` |
 | `STATE_PROGRESS_STALE` | Integrity | `error` |
+| `STATE_TRANSITION_INVALID` | Quality | `warning` |
 | `STATE_GOTCHA_RULE_MISSING` | Integrity | `error` |
+| `STATE_GOTCHA_INVALID` | Integrity | `error` |
 | `VERIFY_REQUIRED_FAILED` | Integrity | `error` |
 | `VERIFY_NOT_CONFIGURED` | Diagnostic | `warning` |
+| `QUALITY_OUT_OF_SCOPE_CHANGE` | Quality | `warning` |
 | `QUALITY_TDD_COVERAGE_RECOMMENDED` | Quality | `warning` |
 | `QUALITY_VISUAL_EVIDENCE_RECOMMENDED` | Quality | `warning` |
 | `DIAGNOSTIC_OUTPUT_TRUNCATED` | Diagnostic | `warning` |
@@ -184,7 +188,8 @@ file.
 |---|---|---|---|---|
 | Bash safety | Safety / `fatal` | Hard block via `.claude/hooks/block-destructive.sh` | Hard block via `.codex/hooks/pre-tool-use.sh` | Not covered |
 | Type-check/lint/tests at finish | Integrity / `error` | Hard block via `stop-verify.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
-| `memory/progress.md` updated | Integrity / `error` | Hard block via `state-enforcement.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
+| Operational state valid and updated | Integrity / `error` | Hard block via `state-enforcement.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
+| Operational change outside task Scope | Quality / `warning` | Advisory via `state-enforcement.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
 | UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or configured hard block | Same through Codex Stop wrapper | Advisory through rules |
 | New export without nearby test | Quality / `warning` | Advisory | Advisory through rules/skills | Advisory through rules |
 | Truncated Bash output | Diagnostic / `warning` | Advisory | Advisory through Codex PostToolUse | Not covered |
@@ -260,6 +265,81 @@ They require `memory/progress.md` to change only when an operationally
 relevant file changed. The classifier sees tracked, staged, and untracked
 files at Stop; pre-commit evaluates staged files only.
 
+`progress.md` has a deliberately small line-oriented format:
+
+```markdown
+# Progress
+
+## Current
+
+Status: verifying
+Task: Preserve third-party Codex hooks
+
+## Scope
+
+- install.sh
+- .codex/hooks/**
+- tests/**
+
+## Next
+
+- Run the Codex-only smoke test
+- Verify reinstall idempotency
+
+## Blockers
+
+None
+
+## Recently Completed
+
+- Shared classifier
+- TOML arrays
+```
+
+The required sections are `Current`, `Next`, `Blockers`, and
+`Recently Completed`, in that order; `Scope` is optional between Current
+and Next. There must be exactly one status, at most one task, explicit
+Next/Blockers content, and no more than five recent completions. A task
+is required for `active`, `blocked`, and `verifying`. Malformed progress
+blocks when it is itself changed or when relevant source changes depend
+on it; an absent progress file preserves the existing opt-out behavior.
+
+The installer still never overwrites an existing `memory/progress.md`.
+A legacy file without this structure remains untouched, but the next
+operational change reports `STATE_PROGRESS_INVALID` with migration
+guidance. Migration is deliberate and manual; hooks do not silently
+rewrite project state.
+
+Allowed statuses and transitions are:
+
+```text
+planned -> active
+active -> blocked
+active -> verifying
+blocked -> active
+verifying -> active
+verifying -> done
+done -> planned
+done -> active
+```
+
+An unchanged status is allowed. When Git has a valid previous
+`progress.md`, the hook compares it with the current worktree or staged
+snapshot. It does not infer semantic intent or persist a hidden state
+history. An observed change outside the direct transition list warns
+rather than blocks because Git cannot prove that no uncommitted
+intermediate state existed.
+
+`Scope` contains shell-style path globs. Relevant files inside it are
+normal; relevant files outside it produce
+`QUALITY_OUT_OF_SCOPE_CHANGE` with `warning` severity and their paths.
+No Scope means no scope analysis. Files ignored by the existing source
+classifier never enter scope analysis.
+
+Scope is focus control, not a sandbox. It does not replace destructive
+command protection, path protection, Git permissions, the host sandbox,
+or human approval. No TOML keys were added for this feature.
+
 Defaults cover conventional source/test directories and common code
 extensions. Clear metadata and infrastructure such as `docs/**`,
 `*.md`, `.gitignore`, `.ai-memory.toml`, `.github/**`, and agent runtime
@@ -320,6 +400,16 @@ enabled = true
 Projects that consider all of `scripts/**` or `tools/**` non-operational
 can add those paths to their own `ignore_globs`.
 
+## Evidence-First Workflow
+
+Before behavior changes, establish reproducible evidence of the current
+or failing behavior. Appropriate evidence includes unit/integration
+tests, CLI exit codes, HTTP responses, smoke tests, log assertions,
+snapshots, and visual artifacts. Observe it, make the smallest change,
+repeat the same evidence, then run regression checks. TDD remains the
+preferred form when it is cheap and applicable; inspection alone is not
+completion evidence.
+
 ## Visual Evidence
 
 UI work needs more than passing tests. Capture a screenshot:
@@ -351,15 +441,26 @@ fields.
 `memory/` is a small handoff surface for the current work:
 
 - `agents.md` — active agents, MCPs, tech stack, tooling
-- `plan.md` — current direction and active implementation slices
-- `progress.md` — current task, next steps, blockers, and at most five
-  recent verified outcomes
-- `verify.md` — current definition of done
-- `gotchas.md` — prevention rules for traps that still apply
+- `plan.md` — current direction, current phase, and decisions still in
+  force; remove superseded decisions
+- `progress.md` — one current task/status, optional scope, immediate next
+  steps, explicit blockers, and at most five recent outcomes
+- `verify.md` — current executable checks and definition of done
+- `gotchas.md` — only reusable invariants and recurring, non-obvious
+  failure modes that still apply
 
 Do not turn these files into a development journal. Prune superseded
 plans, old completions, and irrelevant gotchas. Git retains factual code
 history; ICM, when enabled, retains semantic and cross-agent history.
+
+Each gotcha uses a `##` title and requires non-empty `**Rule:**` and
+`**Why:**` fields. `**Scope:**`, `**Evidence:**`, and `**Added:**` are
+recommended. Do not record every correction; remove obsolete entries.
+
+Operational handoff relies first on `progress.md`, `plan.md`,
+`verify.md`, `gotchas.md`, and Git. ICM can provide older context, but it
+is not needed to determine where work stands, what remains, blockers, or
+the next action.
 
 Installation templates live separately under
 `.agent-md/templates/memory/`, so this repository's own operational state
@@ -401,6 +502,9 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - When `memory/progress.md` is gitignored, state enforcement falls back
   to file mtimes. That is a lower-reliability approximation than Git
   state and can be affected by clocks or file-copy tooling.
+- Transition validation can compare only states captured by Git or its
+  index. Uncaptured intermediate edits are not factual history and cannot
+  be reconstructed without adding persistence, which this phase avoids.
 
 ## Development
 

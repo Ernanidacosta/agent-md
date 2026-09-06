@@ -77,8 +77,11 @@ EOF
   install_agent_md --agent=cursor
   [ -f "$TARGET_DIR/memory/progress.md" ]
   ! grep -q "ICM coexistence implementation" "$TARGET_DIR/memory/progress.md"
-  grep -q '^## In Progress' "$TARGET_DIR/memory/progress.md"
+  grep -q '^## Current' "$TARGET_DIR/memory/progress.md"
+  grep -q '^Status: planned$' "$TARGET_DIR/memory/progress.md"
   ! grep -q '\*\*Rule\*\*:' "$TARGET_DIR/memory/gotchas.md"
+  run bash -c "cd '$TARGET_DIR' && . .claude/hooks/_lib.sh && validate_progress_content \"\$(cat memory/progress.md)\" && validate_gotchas_content \"\$(cat memory/gotchas.md)\""
+  [ "$status" -eq 0 ]
 }
 
 @test "Cursor-only install gives pre-commit the shared state classifier" {

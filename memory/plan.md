@@ -2,25 +2,29 @@
 
 ## Current Phase
 
-Policy Foundation is implemented and verified. This phase adds shared
-policy vocabulary and documentation, not a policy engine.
+Formalize current operational truth for deterministic validation and
+cross-agent handoff without creating historical memory.
 
 ## Implementation Slices
 
-1. [x] Make normative priorities and architectural non-goals explicit.
-2. [x] Add the shared structured result, severity model, and stable codes.
-3. [x] Adapt existing controls without changing Claude/Codex envelopes.
-4. [x] Add policy and adversarial classifier coverage; document known
-   TOML, glob, and mtime limitations.
-5. [x] Complete the full acceptance matrix and operational handoff.
+1. [x] Establish failing evidence for progress, transition, scope, gotcha,
+   and directive contracts.
+2. [x] Add the small Markdown state validator and shared scope analysis.
+3. [x] Migrate directives, templates, and operational memory.
+4. [x] Run the complete acceptance matrix and close the handoff.
+
+## Decisions Still In Force
+
+- Git supplies the previous factual state when transition validation is
+  possible; no sidecar persistence is introduced.
+- Scope is a non-blocking focus signal, never a safety boundary.
+- The TOML schema and existing source classifier remain unchanged.
 
 ## Deferred / Out of Scope
 
 - Policy profiles, autonomy modes, risk or decision engines.
-- Task-scope enforcement and a new progress state machine.
-- Broad self-test or new independent-verification machinery.
-- ICM daemon/API coupling, semantic change detection, or new historical
-  memory storage.
+- New independent-verification machinery or broad self-test.
+- Runtime ICM dependency or a new historical-memory layer.
 
 ## Open Questions
 
