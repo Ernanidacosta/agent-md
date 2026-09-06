@@ -153,6 +153,12 @@ Stable codes currently emitted by controls are deliberately limited:
 | `VERIFY_TIMEOUT` | Integrity or Quality | `error` when required; otherwise `warning` |
 | `VERIFY_NOT_CONFIGURED` | Diagnostic | `warning` |
 | `VERIFY_PASSED` | Diagnostic evidence | `info` |
+| `RISK_NOT_DECLARED` | Quality / migration | `warning` |
+| `RISK_INVALID` | Integrity | `error` |
+| `RISK_POSSIBLY_UNDERRATED` | Quality | `warning` |
+| `RISK_RUNTIME_EVIDENCE_REQUIRED` | Integrity or Quality | `error` when applicable evidence fails; otherwise `warning` |
+| `RISK_INDEPENDENT_VERIFICATION_REQUIRED` | Integrity | `error` |
+| `RISK_HUMAN_APPROVAL_REQUIRED` | Integrity | `error` |
 | `QUALITY_OUT_OF_SCOPE_CHANGE` | Quality | `warning` |
 | `QUALITY_TDD_COVERAGE_RECOMMENDED` | Quality | `warning` |
 | `QUALITY_VISUAL_EVIDENCE_RECOMMENDED` | Quality | `warning` |
@@ -194,6 +200,8 @@ file.
 | Bash safety | Safety / `fatal` | Hard block via `.claude/hooks/block-destructive.sh` | Hard block via `.codex/hooks/pre-tool-use.sh` | Not covered |
 | Required verification at finish | Integrity / `error` | Hard block via `stop-verify.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
 | Optional verification failure | Quality / `warning` | Advisory via `stop-verify.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
+| Risk declaration/signals | Integrity or Quality | Block invalid; warn missing/underrated | Same through Codex Stop wrapper | Invalid blocks; signals warn |
+| High/critical final evidence | Integrity / `error` | Blocks `done` via `stop-verify.sh` | Same through Codex Stop wrapper | Advisory at pre-commit |
 | Operational state valid and updated | Integrity / `error` | Hard block via `state-enforcement.sh` | Continuation via `.codex/hooks/stop.sh` | Optional `.githooks/pre-commit` |
 | Operational change outside task Scope | Quality / `warning` | Advisory via `state-enforcement.sh` | Advisory through Codex Stop wrapper | Warning via optional pre-commit |
 | UI visual evidence | Quality / `warning`, or Integrity / `error` when required | Advisory or configured hard block | Same through Codex Stop wrapper | Advisory through rules |
@@ -272,9 +280,10 @@ freshness_seconds = 3600
 enabled = true
 ```
 
-Supported completion checks are `typecheck`, `lint`, `test`, `integration`,
-`smoke`, and `runtime`. `lint_file` remains the fast PostToolUse check and is
-not part of the completion contract.
+Supported base completion checks are `typecheck`, `lint`, `test`,
+`integration`, `smoke`, and `runtime`. `independent` and `approval` are
+conditional Risk evidence verifiers. `lint_file` remains the fast PostToolUse
+check and is not part of the completion contract.
 
 When `[verify.policy].required` exists, listed checks are required and all
 other configured or inferred checks are optional. A listed check with no
@@ -339,6 +348,89 @@ When no checks are configured or inferred, hooks allow completion but emit
 `VERIFY_NOT_CONFIGURED`: the work is explicitly unverified, never silently
 treated as verified.
 
+## Risk Model
+
+Risk controls the amount of evidence, review, and approval required for a
+task. It does not decide whether code is safe and does not assign a numeric
+score. The explicit task declaration is primary:
+
+```markdown
+## Current
+
+Status: verifying
+Task: Harden auth token rotation
+Risk: high
+```
+
+Exactly one `Risk:` is expected for new operational tasks. Allowed values are
+`low`, `medium`, `high`, and `critical`. Existing progress files without Risk
+remain readable; when relevant work changes they emit `RISK_NOT_DECLARED`
+instead of silently becoming low. Invalid or duplicate declarations emit
+`RISK_INVALID` and fail closed. Upgrades never overwrite existing progress.
+
+| Risk | Additional completion requirement |
+|---|---|
+| `low` | Current required verification contract |
+| `medium` | Required checks plus a passing configured runtime or smoke check when applicability is declared |
+| `high` | Medium requirements plus trusted independent verification |
+| `critical` | High requirements plus trusted explicit human approval |
+
+When neither runtime nor smoke is configured for medium/high/critical,
+agent-md cannot determine semantic applicability. It emits an advisory
+`RISK_RUNTIME_EVIDENCE_REQUIRED` warning and does not invent a command. When
+either check is configured, at least one must pass before `done` is accepted.
+
+Risk-sensitive evidence uses two conditional commands in the existing
+verification section:
+
+```toml
+[verify]
+test = "bats tests/"
+runtime = "./scripts/runtime-smoke.sh"
+independent = "./scripts/verify-ci-attestation.sh"
+approval = "./scripts/verify-human-approval.sh"
+
+[verify.policy]
+required = ["test"]
+```
+
+`independent` and `approval` do not belong in `verify.policy.required`; Risk
+activates them only for a final `Status: done`. To prevent same-task
+self-attestation, their exact command must already exist unchanged in the
+committed `agent-md.toml` at `HEAD`. The command must validate its own trusted
+external source: CI, a separate reviewer/harness, signed human approval, or a
+host approval workflow. agent-md trusts its exit code, not natural-language
+output. Adding `approval = "true"` in the current worktree, writing
+`By: human`, or claiming approval in chat is never accepted. Without a
+reliable configured approval verifier, critical remains blocked.
+
+The defensive signal audit recognizes explicit path/content indicators for:
+
+- authentication/authorization and permissions;
+- credentials, secrets, and vaults;
+- production/deployment and infrastructure/Terraform;
+- migrations/schema and newly added destructive SQL;
+- payments/billing;
+- explicit OpenAPI/Swagger/public-API surfaces.
+
+Signals can produce `RISK_POSSIBLY_UNDERRATED`, with signal names and paths,
+but never rewrite Risk or prove a classification. Examples are guidance, not
+an automatic safety verdict.
+
+Final evidence requirements apply only to `done`. `active`, `blocked`, and
+`verifying` remain usable while evidence is pending. Fatal Safety controls
+always remain independent: critical Risk and valid approval cannot bypass a
+destructive-command block. Stop and `verify.sh` enforce final Risk evidence;
+pre-commit validates Risk syntax and reports signals but deliberately does not
+require final independent/human approval.
+
+Doctor reports the declaration, status, observed signals, consistency, and
+whether runtime/independent/approval wiring exists. It does not run checks,
+approve work, or call a reviewer. `verify.sh` performs the full sequence:
+validate progress/Risk, run the base verification contract, apply final Risk
+requirements, execute applicable trusted evidence verifiers, and return
+non-zero for a blocking result.
+
 ## Operational State Enforcement
 
 The Stop and pre-commit hooks share one deterministic path classifier.
@@ -355,6 +447,7 @@ files at Stop; pre-commit evaluates staged files only.
 
 Status: verifying
 Task: Preserve third-party Codex hooks
+Risk: medium
 
 ## Scope
 
@@ -379,9 +472,11 @@ None
 
 The required sections are `Current`, `Next`, `Blockers`, and
 `Recently Completed`, in that order; `Scope` is optional between Current
-and Next. There must be exactly one status, at most one task, explicit
-Next/Blockers content, and no more than five recent completions. A task
-is required for `active`, `blocked`, and `verifying`. Malformed progress
+and Next. There must be exactly one status, at most one task, at most one
+legacy-compatible Risk declaration, explicit Next/Blockers content, and no
+more than five recent completions. A task is required for `active`, `blocked`,
+and `verifying`. New work declares one valid Risk; legacy absence warns when
+relevant files change. Malformed progress
 blocks when it is itself changed or when relevant source changes depend
 on it; an absent progress file preserves the existing opt-out behavior.
 
@@ -600,9 +695,17 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
   “not preflighted”; actual exit status remains authoritative.
 - Per-check timeout depends on the portable environment providing `timeout`
   or `gtimeout`. Without an explicit timeout, only host/process limits apply.
-- “Independent” is a documented evidence class, not orchestration. Risk-based
-  requirements, reviewer selection, and automatic independent execution are
-  deferred to the future Risk Model.
+- Risk signals are keyword/path/diff heuristics. They can flag possible
+  underrating but cannot determine safety, intent, reversibility, or blast
+  radius.
+- A committed evidence-verifier command is a trust anchor, not proof about its
+  downstream implementation. Projects remain responsible for making that
+  command validate genuine external CI/reviewer/human provenance.
+- Runtime applicability cannot be inferred generally. No configured
+  runtime/smoke command produces a warning rather than false enforcement.
+- Independent evidence is conditional enforcement, not orchestration.
+  Reviewer selection, automatic reviewer/model calls, profiles, and autonomy
+  remain deferred.
 
 ## Development
 

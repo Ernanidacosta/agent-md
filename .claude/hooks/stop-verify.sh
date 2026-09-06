@@ -32,7 +32,9 @@
 cat > /dev/null
 
 TOML=$(toml_path)
-SUMMARY=$(run_verification_contract "$TOML")
+VERIFY_SUMMARY=$(run_verification_contract "$TOML")
+RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
+SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
 STATUS=$(printf '%s' "$SUMMARY" | jq -r '.status')
 
 if [ "$STATUS" = fail ]; then

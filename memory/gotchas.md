@@ -23,3 +23,11 @@
 **Scope:** .claude/hooks/**, .githooks/**
 **Evidence:** policy-contract and stop-verify Bats coverage
 **Added:** 2026-09
+
+## Approval verifier provenance
+
+**Rule:** Accept independent or human-approval evidence only through a verifier command already present unchanged in the committed agent-md.toml.
+**Why:** Worktree prose or a verifier added by the implementing agent would allow self-attestation of high/critical completion.
+**Scope:** .claude/hooks/_lib.sh, agent-md.toml
+**Evidence:** risk-model trusted-verifier and fake-approval cases
+**Added:** 2026-09

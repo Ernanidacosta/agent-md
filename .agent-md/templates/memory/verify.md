@@ -6,6 +6,8 @@ Only current, executable verification criteria belong here.
 
 - [ ] `./.agent-md/bin/verify.sh` passes the required project contract.
 - [ ] Task-specific regression tests cover changed behavior.
+- [ ] High/critical work has trusted independent evidence; critical work has
+  externally validated human approval.
 
 ## Runtime Evidence
 

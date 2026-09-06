@@ -3,6 +3,7 @@
 [verify]
 lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh .githooks/pre-commit install.sh"
 test = "bats tests/"
+smoke = "bats tests/codex-hooks.bats tests/install.bats"
 
 [verify.policy]
 required = ["lint", "test"]

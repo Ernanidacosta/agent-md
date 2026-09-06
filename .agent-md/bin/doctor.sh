@@ -105,6 +105,69 @@ if [ -f "$SHARED_LIB" ]; then
   fi
 fi
 
+if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
+  PROGRESS_CONTENT=$(cat memory/progress.md)
+  printf 'Risk:\n'
+  if ! PROGRESS_ERROR=$(validate_progress_content "$PROGRESS_CONTENT"); then
+    bad "[ERROR STATE_PROGRESS_INVALID] $PROGRESS_ERROR"
+  else
+    PROGRESS_STATUS=$(progress_status_from_content "$PROGRESS_CONTENT")
+    RISK_COUNT=$(progress_risk_count_from_content "$PROGRESS_CONTENT")
+    RISK_VALUE=$(progress_risk_from_content "$PROGRESS_CONTENT")
+    RISK_FILES=$(risk_changed_files worktree || true)
+    RISK_SIGNALS=$(risk_signals_for_files "$RISK_FILES" worktree)
+    printf '  declared: %s\n' "${RISK_VALUE:-not declared}"
+    printf '  status: %s\n' "$PROGRESS_STATUS"
+    printf '  signals: %s\n' "$(if [ -n "$RISK_SIGNALS" ]; then printf '%s\n' "$RISK_SIGNALS" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }'; else printf none; fi)"
+    if [ "$RISK_COUNT" -eq 0 ]; then
+      if [ -n "$RISK_FILES" ]; then
+        warn "[WARNING RISK_NOT_DECLARED] Relevant work has no declared Risk; no low default was inferred."
+      fi
+      printf '  consistency: not declared\n'
+    elif [ "$RISK_COUNT" -ne 1 ] || ! printf '%s\n' "$RISK_VALUE" | grep -Eq '^(low|medium|high|critical)$'; then
+      bad "[ERROR RISK_INVALID] Risk must occur once and be low, medium, high, or critical."
+      printf '  consistency: invalid\n'
+    elif [ -n "$(risk_underrating_signals "$RISK_VALUE" "$RISK_SIGNALS")" ]; then
+      warn "[WARNING RISK_POSSIBLY_UNDERRATED] Declared Risk may be inconsistent with observed signals."
+      printf '  consistency: review suggested\n'
+    else
+      printf '  consistency: ok\n'
+    fi
+
+    if [ "$(printf '%s' "$CONTRACT" | jq -r '.valid')" = true ]; then
+      printf 'Requirements:\n'
+      REQUIRED_MISSING=$(printf '%s' "$CONTRACT" | jq '[.checks[] | select(.requirement == "required" and .origin == "not configured")] | length')
+      if [ "$REQUIRED_MISSING" -eq 0 ]; then
+        printf '  required checks: configured\n'
+      else
+        printf '  required checks: missing\n'
+      fi
+      RUNTIME_COUNT=$(printf '%s' "$CONTRACT" | jq '[.checks[] | select((.name == "runtime" or .name == "smoke") and .origin != "not configured")] | length')
+      if [ "$RUNTIME_COUNT" -gt 0 ]; then
+        printf '  runtime/smoke: configured\n'
+      else
+        printf '  runtime/smoke: not configured (applicability advisory)\n'
+      fi
+
+      for EVIDENCE_CHECK in independent approval; do
+        EVIDENCE_ORIGIN=$(printf '%s' "$CONTRACT" | jq -r --arg check "$EVIDENCE_CHECK" '.checks[] | select(.name == $check) | .origin')
+        if [ "$EVIDENCE_ORIGIN" != configured ]; then
+          EVIDENCE_STATE="not configured"
+        elif risk_evidence_command_trusted "$(toml_path)" "$EVIDENCE_CHECK"; then
+          EVIDENCE_STATE="configured, trusted"
+        else
+          EVIDENCE_STATE="configured, not established in HEAD"
+        fi
+        if [ "$EVIDENCE_CHECK" = independent ]; then
+          printf '  independent verification: %s\n' "$EVIDENCE_STATE"
+        else
+          printf '  human approval: %s\n' "$EVIDENCE_STATE"
+        fi
+      done
+    fi
+  fi
+fi
+
 # ICM is an optional semantic/historical memory provider. Detection is
 # deliberately read-only: doctor never starts it or calls its daemon/API.
 ICM_ENABLED=""

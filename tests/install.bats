@@ -80,6 +80,8 @@ EOF
   ! grep -q "ICM coexistence implementation" "$TARGET_DIR/memory/progress.md"
   grep -q '^## Current' "$TARGET_DIR/memory/progress.md"
   grep -q '^Status: planned$' "$TARGET_DIR/memory/progress.md"
+  ! grep -q '^Risk:' "$TARGET_DIR/memory/progress.md"
+  grep -q 'declare exactly one Risk' "$TARGET_DIR/memory/progress.md"
   ! grep -q '\*\*Rule\*\*:' "$TARGET_DIR/memory/gotchas.md"
   run bash -c "cd '$TARGET_DIR' && . .claude/hooks/_lib.sh && validate_progress_content \"\$(cat memory/progress.md)\" && validate_gotchas_content \"\$(cat memory/gotchas.md)\""
   [ "$status" -eq 0 ]

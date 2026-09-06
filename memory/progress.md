@@ -3,7 +3,8 @@
 ## Current
 
 Status: done
-Task: Harden the verification contract with objective required evidence.
+Task: Add a small auditable Risk Model that scales completion evidence.
+Risk: medium
 
 ## Scope
 
@@ -11,6 +12,7 @@ Task: Harden the verification contract with objective required evidence.
 - .agent-md/bin/**
 - .agents/skills/agent-md-verify/**
 - .githooks/**
+- .agent-md/templates/memory/**
 - agent-md.toml.example
 - tests/**
 
@@ -24,8 +26,8 @@ None
 
 ## Recently Completed
 
+- Added a four-level Risk Model that scales final evidence without classifying implementation safety.
 - Added one shared required/optional verification contract with timeout, evidence classes, doctor, and CLI support.
 - Formalized progress validation, transition warnings, Scope warnings, structured gotchas, pruning, and handoff.
 - Established the shared policy result and severity contract.
 - Added configurable source classification shared by Stop and pre-commit.
-- Preserved third-party Claude and Codex hooks through idempotent merge.

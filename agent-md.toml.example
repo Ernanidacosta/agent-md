@@ -33,11 +33,21 @@
 # smoke = "./scripts/smoke.sh"
 # runtime = "./bin/my-cli --version"
 
+# Conditional evidence verifiers. They are not ordinary optional checks:
+# Risk high/critical requires `independent`; Risk critical also requires
+# `approval`. To prevent self-attestation, the exact command must already be
+# present in the committed HEAD version of agent-md.toml. Each command must
+# validate its external source (CI, reviewer, signed approval, host workflow,
+# or independent harness) and communicate success by exit 0.
+# independent = "./scripts/verify-ci-attestation.sh"
+# approval = "./scripts/verify-human-approval.sh"
+
 [verify.policy]
 # When omitted, configured/inferred checks retain the legacy required
 # behavior. When present, listed checks are required and other configured or
 # inferred checks are optional. Allowed names: typecheck, lint, test,
-# integration, smoke, runtime.
+# integration, smoke, runtime. Independent/approval are conditional on Risk
+# and do not belong in this array.
 # required = ["lint", "test", "smoke"]
 
 # Optional per-check timeout. A required timeout blocks; an optional timeout

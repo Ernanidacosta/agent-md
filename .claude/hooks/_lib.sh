@@ -206,13 +206,22 @@ policy_result_json() {
 # Keeps hook output readable while exposing stable severity/code tokens.
 policy_human_message() {
   local result="$1" severity code message suggestion paths rendered
+  local risk current_status signals missing_requirement
   severity=$(printf '%s' "$result" | jq -r '.severity | ascii_upcase')
   code=$(printf '%s' "$result" | jq -r '.code')
   message=$(printf '%s' "$result" | jq -r '.message')
   suggestion=$(printf '%s' "$result" | jq -r '.suggestion // empty')
   paths=$(printf '%s' "$result" | jq -r '(.paths // []) | join(", ")')
+  risk=$(printf '%s' "$result" | jq -r '.risk // empty')
+  current_status=$(printf '%s' "$result" | jq -r '.current_status // empty')
+  signals=$(printf '%s' "$result" | jq -r '(.observed_signals // []) | join(", ")')
+  missing_requirement=$(printf '%s' "$result" | jq -r '.missing_requirement // empty')
 
   rendered="[${severity} ${code}] ${message}"
+  [ -z "$risk" ] || rendered="${rendered} Risk: ${risk}."
+  [ -z "$current_status" ] || rendered="${rendered} Current status: ${current_status}."
+  [ -z "$signals" ] || rendered="${rendered} Signals: ${signals}."
+  [ -z "$missing_requirement" ] || rendered="${rendered} Missing: ${missing_requirement}."
   [ -z "$paths" ] || rendered="${rendered} Paths: ${paths}."
   [ -z "$suggestion" ] || rendered="${rendered} Recovery: ${suggestion}"
   printf '%s\n' "$rendered"
@@ -249,7 +258,7 @@ has_npm_test_script() {
 }
 
 verification_check_names() {
-  printf '%s\n' typecheck lint test integration smoke runtime
+  printf '%s\n' typecheck lint test integration smoke runtime independent approval
 }
 
 # infer_verification_command <check>
@@ -377,7 +386,9 @@ EOF
       [ -z "$command" ] || origin="inferred"
     fi
 
-    if [ "$required_declared" -eq 1 ]; then
+    if [ "$check" = independent ] || [ "$check" = approval ]; then
+      requirement="conditional"
+    elif [ "$required_declared" -eq 1 ]; then
       if printf '%s\n' "$required_values" | grep -qxF "$check"; then
         requirement="required"
       else
@@ -582,7 +593,9 @@ run_verification_contract() {
 
   while IFS= read -r spec; do
     [ -n "$spec" ] || continue
-    if [ "$(printf '%s' "$spec" | jq -r '.origin')" != "not configured" ]; then
+    if [ "$(printf '%s' "$spec" | jq -r '.requirement')" = conditional ]; then
+      continue
+    elif [ "$(printf '%s' "$spec" | jq -r '.origin')" != "not configured" ]; then
       resolved_count=$((resolved_count + 1))
       result=$(run_verification_check "$spec" "$timeout_seconds")
       printf '%s\n' "$result" >> "$results_file"
@@ -818,8 +831,11 @@ validate_progress_content() {
         } else if ($0 ~ /^Task:/) {
           task_count++
           task_value = trim(substr($0, 6))
+        } else if ($0 ~ /^Risk:/) {
+          risk_count++
+          risk_value = trim(substr($0, 6))
         } else {
-          fail("## Current accepts only Status and Task fields.")
+          fail("## Current accepts only Status, Task, and Risk fields.")
         }
       } else if (section == "scope") {
         if ($0 ~ /^- [^[:space:]]/) scope_item_count++
@@ -881,6 +897,342 @@ progress_scope_from_content() {
     /^## Scope$/ { scope = 1; next }
     /^## / { scope = 0 }
     scope && /^- [^[:space:]]/ { print substr($0, 3) }
+  '
+}
+
+progress_risk_count_from_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    /^## Current$/ { current = 1; next }
+    /^## / { current = 0 }
+    current && /^Risk:/ { count++ }
+    END { print count + 0 }
+  '
+}
+
+progress_risk_from_content() {
+  local content="$1"
+  printf '%s\n' "$content" | awk '
+    /^## Current$/ { current = 1; next }
+    /^## / { current = 0 }
+    current && /^Risk:/ {
+      value = substr($0, 6)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print value
+      exit
+    }
+  '
+}
+
+risk_result_json() {
+  local result_status="$1" severity="$2" code="$3" message="$4"
+  local suggestion="$5" risk="$6" current_status="$7" signals="${8:-}"
+  local paths="${9:-}" missing_requirement="${10:-}" base signals_json
+  base=$(policy_result_json "$result_status" "$severity" "$code" "$message" "$suggestion" "$paths")
+  signals_json=$(printf '%s' "$signals" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  jq -cn \
+    --argjson base "$base" --arg risk "$risk" --arg current_status "$current_status" \
+    --arg missing_requirement "$missing_requirement" --argjson signals "$signals_json" '
+      $base + {
+        risk: (if $risk == "" then null else $risk end),
+        current_status: $current_status,
+        observed_signals: $signals
+      } + if $missing_requirement == "" then {} else {missing_requirement:$missing_requirement} end
+    '
+}
+
+risk_changed_files() {
+  local scope="${1:-worktree}" modified_files
+  load_state_globs || return 2
+  modified_files=$(changed_files "$scope")
+  printf '%s\n' "$modified_files" | filter_operationally_relevant_files
+}
+
+risk_file_has_destructive_sql() {
+  local file="$1" scope="${2:-worktree}" diff_content
+  case "$file" in *.sql) ;; *) return 1 ;; esac
+  if [ "$scope" = staged ]; then
+    diff_content=$(git diff --cached --unified=0 -- "$file" 2>/dev/null)
+  elif git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+    diff_content=$(git diff HEAD --unified=0 -- "$file" 2>/dev/null)
+  elif [ -f "$file" ]; then
+    diff_content=$(sed 's/^/+/' "$file")
+  else
+    return 1
+  fi
+  printf '%s\n' "$diff_content" \
+    | grep -Eiv '^\+\+\+' \
+    | grep -Eiq '^\+.*(DROP[[:space:]]+TABLE|TRUNCATE([[:space:]]+TABLE)?|DELETE[[:space:]]+FROM)'
+}
+
+# risk_signals_for_files <newline-paths> [worktree|staged]
+# Signals are audit hints, never an automatic risk classification.
+risk_signals_for_files() {
+  local files="$1" scope="${2:-worktree}" file lower signals=""
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    lower=$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(auth|authentication|authorization)([/_.-]|$)'; then
+      signals="${signals}\nauth"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(permission|permissions|rbac|acl)([/_.-]|$)'; then
+      signals="${signals}\npermissions"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(credential|credentials|secret|secrets|vault)([/_.-]|$)'; then
+      signals="${signals}\ncredentials"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(production|prod)([/_.-]|$)'; then
+      signals="${signals}\nproduction"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(payment|payments|billing|checkout|invoice)([/_.-]|$)'; then
+      signals="${signals}\npayments"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(migration|migrations|schema)([/_.-]|$)'; then
+      signals="${signals}\nmigration"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(infra|infrastructure|terraform|deploy|deployment|k8s|helm)([/_.-]|$)|\.tf$'; then
+      signals="${signals}\ninfrastructure"
+    fi
+    if printf '%s\n' "$lower" | grep -Eq '(^|[/_.-])(openapi|swagger|public-api|public_api)([/_.-]|$)|(^|/)public/api/|(^|/)api/public/'; then
+      signals="${signals}\npublic-api"
+    fi
+    if risk_file_has_destructive_sql "$file" "$scope"; then
+      signals="${signals}\ndestructive-db"
+    fi
+  done <<EOF
+$files
+EOF
+  printf '%b\n' "$signals" | awk 'NF' | sort -u
+}
+
+risk_underrating_signals() {
+  local risk="$1" signals="$2" signal
+  while IFS= read -r signal; do
+    [ -n "$signal" ] || continue
+    case "$risk:$signal" in
+      low:*|medium:*|high:credentials|high:production|high:destructive-db|\
+      high:payments|high:public-api) printf '%s\n' "$signal" ;;
+    esac
+  done <<EOF
+$signals
+EOF
+}
+
+# Evidence/approval verifiers are trusted only when their exact command was
+# already present in the factual HEAD version of agent-md.toml. This prevents
+# the implementing agent from adding a no-op verifier and self-attesting in
+# the same worktree. The configured command remains responsible for checking
+# its external CI/reviewer/human source.
+risk_evidence_command_trusted() {
+  local config="$1" check="$2" head_config head_command current_command
+  case "$config" in /*|*'..'*) return 1 ;; esac
+  git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
+  git cat-file -e "HEAD:${config}" 2>/dev/null || return 1
+  head_config=$(mktemp "${TMPDIR:-/tmp}/agent-md-head-config.XXXXXX") || return 1
+  if ! git show "HEAD:${config}" > "$head_config" 2>/dev/null; then
+    rm -f "$head_config"
+    return 1
+  fi
+  if ! toml_key_present "$head_config" verify "$check"; then
+    rm -f "$head_config"
+    return 1
+  fi
+  head_command=$(read_toml "$head_config" verify "$check")
+  current_command=$(read_toml "$config" verify "$check")
+  rm -f "$head_config"
+  [ -n "$head_command" ] && [ "$head_command" = "$current_command" ]
+}
+
+risk_evidence_result() {
+  local contract="$1" check="$2" code="$3" risk="$4" current_status="$5"
+  local signals="$6" config="$7" spec origin command timeout_seconds check_result
+  local message suggestion result_status
+  spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
+  origin=$(printf '%s' "$spec" | jq -r '.origin')
+  command=$(printf '%s' "$spec" | jq -r '.command')
+  if [ "$origin" != configured ]; then
+    message="Risk '${risk}' requires '${check}' evidence from a configured verifier."
+    suggestion="Configure a trusted verify.${check} command in a reviewed baseline, provide the external evidence, and rerun verification."
+    risk_result_json fail error "$code" "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "" "$check"
+    return 0
+  fi
+  if ! risk_evidence_command_trusted "$config" "$check"; then
+    message="Risk '${risk}' cannot trust verify.${check} because its command was not present unchanged in HEAD."
+    suggestion="Have the project owner review and establish the verifier before using it as independent evidence."
+    risk_result_json fail error "$code" "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$config" "$check"
+    return 0
+  fi
+
+  spec=$(printf '%s' "$spec" | jq -c '.requirement = "required"')
+  timeout_seconds=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
+  check_result=$(run_verification_check "$spec" "$timeout_seconds")
+  result_status=$(printf '%s' "$check_result" | jq -r '.status')
+  if [ "$result_status" = pass ]; then
+    printf '%s\n' "$check_result"
+    return 0
+  fi
+
+  message="Risk '${risk}' requires passing '${check}' evidence, but the trusted verifier did not pass."
+  suggestion="Satisfy the external ${check} verifier and rerun verification."
+  risk_result_json fail error "$code" "$message" "$suggestion" \
+    "$risk" "$current_status" "$signals" "" "$check" \
+    | jq -c --argjson check_result "$check_result" '
+        . + {
+          check:$check_result.check,
+          requirement:"required",
+          origin:$check_result.origin,
+          command:$check_result.command,
+          evidence:$check_result.evidence,
+          truncated:$check_result.truncated
+        } + if $check_result.exit_code == null then {} else {exit_code:$check_result.exit_code} end
+      '
+}
+
+risk_summary_json() {
+  local results="$1" risk="$2" current_status="$3" signals="$4" status
+  status=$(printf '%s' "$results" | jq -r '
+    if any(.[]; .status == "fail") then "fail"
+    elif any(.[]; .status == "warn") then "warn"
+    else "pass" end
+  ')
+  jq -cn --arg status "$status" --arg risk "$risk" --arg current_status "$current_status" \
+    --argjson results "$results" \
+    --argjson signals "$(printf '%s' "$signals" | jq -Rsc 'split("\n") | map(select(length > 0))')" '
+      {status:$status, risk:(if $risk == "" then null else $risk end),
+       current_status:$current_status, observed_signals:$signals, results:$results}
+    '
+}
+
+# run_risk_contract <verification-summary> [worktree|staged] [completion|advisory]
+# Risk changes required evidence; it never claims that the implementation is
+# safe. Final requirements apply only to Status: done at a completion boundary.
+run_risk_contract() {
+  local verification_summary="$1" scope="${2:-worktree}" boundary="${3:-completion}"
+  local progress_content progress_error current_status risk_count risk="" relevant_files relevant_status
+  local signals="" underrated="" results='[]' result contract config runtime_configured runtime_passed
+
+  progress_content=$(state_file_snapshot memory/progress.md "$scope")
+  if [ -z "$progress_content" ]; then
+    risk_summary_json "$results" "" "absent" ""
+    return 0
+  fi
+
+  if ! progress_error=$(validate_progress_content "$progress_content"); then
+    result=$(policy_result_json fail error STATE_PROGRESS_INVALID "$progress_error" \
+      "Restore the documented progress.md structure before claiming completion." memory/progress.md)
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    risk_summary_json "$results" "" "invalid" ""
+    return 0
+  fi
+
+  current_status=$(progress_status_from_content "$progress_content")
+  risk_count=$(progress_risk_count_from_content "$progress_content")
+  relevant_files=$(risk_changed_files "$scope")
+  relevant_status=$?
+  if [ "$relevant_status" -ne 0 ]; then
+    if [ "$relevant_status" -eq 2 ]; then
+      result=$(policy_result_json fail error CONFIG_INVALID "$AGENT_MD_STATE_ERROR" \
+        "Fix the state classifier before evaluating Risk.")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      risk_summary_json "$results" "" "$current_status" ""
+      return 0
+    fi
+  fi
+  signals=$(risk_signals_for_files "$relevant_files" "$scope")
+
+  if [ "$risk_count" -eq 0 ]; then
+    if [ -n "$relevant_files" ]; then
+      result=$(risk_result_json warn warning RISK_NOT_DECLARED \
+        "Operationally relevant work has no declared Risk; agent-md will not silently assume low." \
+        "Add exactly one Risk: low, medium, high, or critical under ## Current." \
+        "" "$current_status" "$signals" "$relevant_files" risk)
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+    risk_summary_json "$results" "" "$current_status" "$signals"
+    return 0
+  fi
+
+  risk=$(progress_risk_from_content "$progress_content")
+  if [ "$risk_count" -ne 1 ] || ! printf '%s\n' "$risk" | grep -Eq '^(low|medium|high|critical)$'; then
+    result=$(risk_result_json fail error RISK_INVALID \
+      "Progress must contain exactly one Risk with value low, medium, high, or critical." \
+      "Correct the Risk field without auto-selecting or rewriting its value." \
+      "$risk" "$current_status" "$signals" memory/progress.md risk)
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    risk_summary_json "$results" "$risk" "$current_status" "$signals"
+    return 0
+  fi
+
+  underrated=$(risk_underrating_signals "$risk" "$signals")
+  if [ -n "$underrated" ]; then
+    result=$(risk_result_json warn warning RISK_POSSIBLY_UNDERRATED \
+      "Declared Risk '${risk}' may be inconsistent with observed sensitive paths or operations." \
+      "Review the declared Risk; signals are advisory and never rewrite it automatically." \
+      "$risk" "$current_status" "$underrated" "$relevant_files" risk)
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  if [ "$boundary" != completion ] || [ "$current_status" != "done" ] \
+    || [ "$(printf '%s' "$verification_summary" | jq -r '.status')" = fail ]; then
+    risk_summary_json "$results" "$risk" "$current_status" "$signals"
+    return 0
+  fi
+
+  contract=$(printf '%s' "$verification_summary" | jq -c '.contract')
+  config=$(toml_path)
+  case "$risk" in
+    medium|high|critical)
+      runtime_configured=$(printf '%s' "$contract" | jq '[.checks[] | select((.name == "runtime" or .name == "smoke") and .origin != "not configured")] | length')
+      runtime_passed=$(printf '%s' "$verification_summary" | jq '[.results[] | select((.check == "runtime" or .check == "smoke") and .status == "pass")] | length')
+      if [ "$runtime_configured" -eq 0 ]; then
+        result=$(risk_result_json warn warning RISK_RUNTIME_EVIDENCE_REQUIRED \
+          "Risk '${risk}' has no declared runtime or smoke check; applicability cannot be determined automatically." \
+          "Review runtime applicability and configure verify.runtime or verify.smoke when executable behavior is in scope." \
+          "$risk" "$current_status" "$signals" "" runtime-or-smoke)
+        results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      elif [ "$runtime_passed" -eq 0 ]; then
+        result=$(risk_result_json fail error RISK_RUNTIME_EVIDENCE_REQUIRED \
+          "Risk '${risk}' declares applicable runtime/smoke verification, but none passed." \
+          "Fix and rerun the configured runtime or smoke check before marking the task done." \
+          "$risk" "$current_status" "$signals" "" runtime-or-smoke)
+        results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      fi
+      ;;
+  esac
+
+  case "$risk" in
+    high|critical)
+      result=$(risk_evidence_result "$contract" independent \
+        RISK_INDEPENDENT_VERIFICATION_REQUIRED "$risk" "$current_status" "$signals" "$config")
+      results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      ;;
+  esac
+
+  if [ "$risk" = critical ]; then
+    result=$(risk_evidence_result "$contract" approval \
+      RISK_HUMAN_APPROVAL_REQUIRED "$risk" "$current_status" "$signals" "$config")
+    results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+  fi
+
+  risk_summary_json "$results" "$risk" "$current_status" "$signals"
+}
+
+combine_policy_summaries() {
+  local first="$1" second="$2"
+  jq -cn --argjson first "$first" --argjson second "$second" '
+    ($first.results + $second.results) as $results |
+    {
+      status: (if any($results[]; .status == "fail") then "fail"
+               elif any($results[]; .status == "warn") then "warn"
+               else "pass" end),
+      contract: $first.contract,
+      risk: ($second.risk // null),
+      current_status: ($second.current_status // null),
+      observed_signals: ($second.observed_signals // []),
+      results: $results
+    }
   '
 }
 

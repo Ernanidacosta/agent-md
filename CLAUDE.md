@@ -61,11 +61,16 @@ If the files do not exist, initialize them before substantive work.
 Prune stale material instead of accumulating an infinite journal.
 
 `progress.md` uses one small, stable contract: `## Current` contains one
-`Status:` and at most one `Task:`; optional `## Scope` contains path-glob
-list items; `## Next` and `## Blockers` are explicit; and
+`Status:`, at most one `Task:`, and one task-declared `Risk:`; optional
+`## Scope` contains path-glob list items; `## Next` and `## Blockers` are explicit; and
 `## Recently Completed` has at most five items. Allowed statuses are
 `planned`, `active`, `blocked`, `verifying`, and `done`. A task is
 required for `active`, `blocked`, and `verifying`.
+
+`Risk:` accepts only `low`, `medium`, `high`, or `critical`. New operational
+tasks must declare exactly one value. Legacy progress without Risk remains
+readable and produces a warning when relevant work changes; never silently
+infer `low`, auto-select, or rewrite the declaration.
 
 Allowed status transitions are `planned -> active`, `active -> blocked`,
 `active -> verifying`, `blocked -> active`, `verifying -> active`,
@@ -86,6 +91,45 @@ evidence and avoids duplicating CI or building a verification log.
 Out-of-scope operational changes produce a warning. Scope never replaces
 safety hooks, path protections, Git permissions, host sandboxing, or
 human approval for critical actions. If Scope is absent, do not infer it.
+
+### Risk And Completion Evidence
+
+Risk answers “how much evidence, review, and approval are required?”, never
+“is this implementation safe?”. There is no numeric score. The declared Risk
+is primary; deterministic path/content signals only audit possible
+underrating and never change it.
+
+- `low` — local, reversible, small blast radius; requires the normal required
+  verification contract.
+- `medium` — meaningful but limited/reversible behavior; additionally requires
+  a passing configured runtime or smoke check when one declares applicability.
+  If neither exists, applicability is ambiguous and remains a visible warning.
+- `high` — significant security, availability, data, or broad behavior impact;
+  adds trusted independent verification evidence.
+- `critical` — elevated irreversible or external harm; adds trusted independent
+  evidence and explicit human approval.
+
+Observable signals include auth/authorization, permissions, credentials or
+secrets, production/deploy/infra, migrations/schema, destructive SQL,
+payments/billing, and explicit public-API surfaces. They are conservative
+warnings, not classifications. Review `RISK_POSSIBLY_UNDERRATED`; do not treat
+it as proof that a particular level is correct.
+
+High/critical independent evidence is provided by `verify.independent`;
+critical human approval is validated by `verify.approval`. These are trusted
+project-configured commands, not prose claims. Their exact command must
+already exist unchanged in the committed `agent-md.toml` at `HEAD`, and each
+verifier must validate its own external source such as CI, a reviewer,
+independent harness, signed approval, or host workflow. A newly added command,
+an agent-authored `By: human`, or an agent saying “approved” is not evidence.
+If no reliable approval verifier exists, a critical task remains blocked.
+
+Final Risk requirements apply only to `Status: done`. Missing evidence must
+not block ordinary work in `active`, `blocked`, or `verifying`. Safety remains
+independent and stronger: neither `Risk: critical` nor passing approval may
+bypass a fatal destructive-command or path-protection result. Stop and
+`verify.sh` enforce final evidence; pre-commit validates Risk integrity and
+signals without requiring final independent/human approval.
 
 When `agent-md.toml` declares `[integrations.icm] enabled = true`, use
 the available ICM integration for historical or cross-agent recall when
@@ -232,7 +276,8 @@ distinct classes; one does not automatically replace another:
   default and agent-md never invokes another model automatically.
 
 `agent-md.toml` may configure `typecheck`, `lint`, `test`, `integration`,
-`smoke`, and `runtime`. An optional `[verify.policy] required` array marks
+`smoke`, and `runtime`, plus conditional `independent` and `approval`
+verifiers. An optional `[verify.policy] required` array marks
 the checks that block. When that array is absent, configured or inferred
 checks keep the legacy required behavior. Explicit configuration always
 wins over heuristic fallback.
@@ -249,6 +294,8 @@ wins over heuristic fallback.
   declared. A required timeout is an error; an optional timeout is a warning.
 - Capture concise diagnostic output and give an exact rerun/recovery path.
   Rerun when relevant files change; do not rely on stale cached evidence.
+- `independent` and `approval` are conditional Risk requirements rather than
+  ordinary optional checks; do not add them to `verify.policy.required`.
 
 For executable behavior, attempt the real path: invoke the CLI, make a
 local request to the API, execute the script, start/smoke the service, or
@@ -361,10 +408,11 @@ Existing controls are classified as follows:
 - **Safety** — destructive-command, dangerous-path, and secret-boundary
   protection in `block-destructive.sh`; normally `fatal`.
 - **Integrity** — valid enforcement configuration, operational-state
-  consistency, and required verification in Stop/PostToolUse/pre-commit;
-  normally `error`.
+  consistency, required verification, valid Risk, and final high/critical
+  evidence in Stop/PostToolUse/pre-commit; normally `error`.
 - **Quality** — evidence-first/TDD nudges, optional verification failures,
-  and optional visual-evidence nudges; normally `warning`.
+  Risk absence/possible underrating, and optional visual-evidence nudges;
+  normally `warning`.
 - **Diagnostic** — doctor, optional ICM presence, output truncation, and
   environment/wiring information; `info` or `warning`. Doctor may still
   fail when a missing core dependency makes installed enforcement
@@ -461,6 +509,8 @@ lint      = "npx --no-install eslint ."
 test      = "pnpm test"
 smoke     = "./scripts/smoke.sh"
 runtime   = "pnpm start -- --help"
+independent = "./scripts/verify-ci-attestation.sh"
+approval    = "./scripts/verify-human-approval.sh"
 lint_file = "npx --no-install eslint {file}"
 
 [verify.policy]

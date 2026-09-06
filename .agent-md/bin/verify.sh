@@ -38,7 +38,13 @@ done < <(printf '%s' "$CONTRACT" | jq -c '.checks[]')
 TIMEOUT=$(printf '%s' "$CONTRACT" | jq -r '.timeout_seconds // "not configured"')
 printf '  timeout: %s\n\n' "$TIMEOUT"
 
-SUMMARY=$(run_verification_contract "$TOML")
+VERIFY_SUMMARY=$(run_verification_contract "$TOML")
+RISK_SUMMARY=$(run_risk_contract "$VERIFY_SUMMARY" worktree completion)
+SUMMARY=$(combine_policy_summaries "$VERIFY_SUMMARY" "$RISK_SUMMARY")
+printf 'Risk Contract:\n'
+printf '  declared: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.risk // "not declared"')"
+printf '  status: %s\n' "$(printf '%s' "$SUMMARY" | jq -r '.current_status // "absent"')"
+printf '  signals: %s\n\n' "$(printf '%s' "$SUMMARY" | jq -r 'if (.observed_signals | length) == 0 then "none" else (.observed_signals | join(", ")) end')"
 verification_summary_human "$SUMMARY" all
 
 PASSED=$(printf '%s' "$SUMMARY" | jq '[.results[] | select(.status == "pass")] | length')

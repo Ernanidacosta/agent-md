@@ -19,7 +19,7 @@ under `.agent-md/templates/memory/`. A target repository's root
 
 - `discover_helpers.sh` — lists/searches local helper scripts
 - `doctor.sh` — checks common install wiring problems
-- `verify.sh` — displays and executes the required/optional verification contract
+- `verify.sh` — executes base verification plus final Risk evidence requirements
 - `playwright-capture.sh` — headless browser screenshot for UI validation
 
 ## Adding a Helper

@@ -36,3 +36,21 @@
   run grep -q 'never invokes another model automatically' "$BATS_TEST_DIRNAME/../AGENT.md"
   [ "$status" -eq 0 ]
 }
+
+@test "directives define non-numeric Risk as evidence policy, not safety judgment" {
+  run grep -q 'Risk answers.*how much evidence' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'There is no numeric score' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  for risk_level in low medium high critical; do
+    run grep -q "\`$risk_level\`" "$BATS_TEST_DIRNAME/../AGENT.md"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "directives forbid self-approval and Safety bypass through Risk" {
+  run grep -q 'agent-authored.*is not evidence' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'bypass a fatal destructive-command' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
