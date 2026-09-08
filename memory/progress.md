@@ -2,8 +2,8 @@
 
 ## Current
 
-Status: verifying
-Task: Finalize Root-of-Trust Bootstrap semantics and its out-of-band checkpoint handoff.
+Status: done
+Task: Complete post-bootstrap readiness for the first legitimate external high-risk attestation.
 Risk: high
 
 ## Scope
@@ -23,18 +23,18 @@ Risk: high
 
 ## Next
 
-- Obtain external human/operational review and create the checkpoint commit only when explicitly authorized.
-- After that commit is HEAD, confirm doctor sees a clean eligible anchor and let GitHub Actions run as information for the bootstrap SHA.
-- Use the preexisting unchanged trust chain only on a future commit; never autoattest this bootstrap change.
+- Commit this completion claim as a child of bootstrap SHA `73748bf6c3d68be063d0ca80aa6e2c3470671977` without changing any trust anchor.
+- Push the child commit and require GitHub Actions success for that exact new SHA.
+- Run the trusted independent verifier and `agent-md verify`; accept this claim only if every applicable guarantee passes.
 
 ## Blockers
 
-- The bootstrap is not committed or externally attested, local `gh` authentication is invalid, and the new verifier cannot bootstrap trust for the change that introduces it.
+- Acceptance of this completion claim is pending external CI and an independent attestation bound to the child commit SHA.
 
 ## Recently Completed
 
+- Completed the local Root-of-Trust Bootstrap implementation and verification without using self-attestation or a bypass.
+- Created and pushed bootstrap checkpoint `73748bf`; doctor now reports the repo-local anchor eligible and clean against HEAD.
+- Confirmed the verifier still refuses self-attestation of its introducing commit and GitHub read-only queries expose no run for that SHA.
+- Restored working `gh` authentication without changing repository credentials or core behavior.
 - Formalized `done` as a completion claim accepted only by all applicable guarantees.
-- Named and documented the out-of-band Root-of-Trust Bootstrap and first future high-risk cycle.
-- Added a GitHub Actions reference verifier with exact-SHA binding, deterministic newest-run selection, and bootstrap/workflow-integrity refusal.
-- Added generic attestation capability diagnostics without putting GitHub or `gh` in core.
-- Hardened attestations with explicit trust anchors, structured origin/kind, and exact commit binding.
