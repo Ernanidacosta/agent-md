@@ -2,27 +2,25 @@
 
 ## Required Checks
 
-- [x] `bats tests/` — 231/231 passed, including bootstrap directives and prior regressions.
-- [x] ShellCheck passed for core and the reference verifier.
-- [x] JSON/TOML validation and `git diff --check` passed.
-- [x] `AGENT.md` and `CLAUDE.md` are identical.
+- [x] `bats tests/` — 231/231 passed, including provider, trust, Risk, and prior regressions.
+- [x] The exact CI ShellCheck target set passed locally with the explicit conditional fix.
+- [x] Pre-commit verification passed with the modified-anchor condition visible as a non-final `verifying` warning.
 
 ## Runtime Evidence
 
-- [x] Doctor remained diagnostic and did not execute the verifier.
-- [x] Claude/Codex and third-party hook smoke tests — 10/10 passed.
-- [x] Invalid local `gh` authentication remained visible without credential changes.
+- [x] GitHub Actions run `34279255376` was bound to child SHA `28ca69a` and exposed the SC2015 portability defect.
+- [x] The verifier rejected that failed run with exit 1 and emitted no passing attestation.
+- [ ] A later claim-only child commit receives `completed/success` CI for its exact SHA.
 
 ## Task-Specific Criteria
 
-- [x] Normative directives define `done` as a claim, not evidence.
-- [x] Root-of-Trust Bootstrap is explicitly human/out-of-band and has no generic bypass.
-- [x] Green CI cannot make an introducing verifier attest its own bootstrap commit.
-- [x] A verifier already in the HEAD baseline can attest a later exact-SHA commit.
-- [x] Prior evidence is documented as invalid after target or trust-chain changes.
+- [x] Replaced the SC2015-prone boolean chain with an equivalent explicit conditional.
+- [x] Missing or `null` workflow references remain fail-closed.
+- [x] No workflow, provider contract, Risk, or trust policy was weakened.
+- [ ] Commit the corrected verifier as a new checkpoint before any later attestation attempt.
 
 ## Independent Evidence
 
-- [ ] A trusted independent verifier attests a later reviewed checkpoint;
-  impossible for this same uncommitted bootstrap change and unavailable while
-  local `gh` authentication remains invalid.
+- [ ] A trusted verifier from the corrected HEAD baseline attests a later
+  claim-only child commit; the checkpoint that modifies the verifier cannot
+  attest itself.

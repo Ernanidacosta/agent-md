@@ -120,8 +120,9 @@ if [ "$RUN_STATUS" != completed ] || [ "$RUN_CONCLUSION" != success ]; then
 fi
 
 REFERENCE=$(printf '%s' "$RUN" | jq -r '.html_url')
-[ -n "$REFERENCE" ] && [ "$REFERENCE" != null ] \
-  || fail "the successful workflow run has no stable reference."
+if [ -z "$REFERENCE" ] || [ "$REFERENCE" = null ]; then
+  fail "the successful workflow run has no stable reference."
+fi
 
 jq -cn --arg commit "$HEAD_SHA" --arg reference "$REFERENCE" '{
   status:"pass",

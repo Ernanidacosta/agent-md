@@ -2,39 +2,30 @@
 
 ## Current
 
-Status: done
-Task: Complete post-bootstrap readiness for the first legitimate external high-risk attestation.
+Status: verifying
+Task: Fix the GitHub verifier ShellCheck portability defect without weakening attestation enforcement.
 Risk: high
 
 ## Scope
 
-- .claude/hooks/**
-- .agent-md/bin/**
-- .agents/skills/agent-md-verify/**
-- .githooks/**
-- .agent-md/templates/memory/**
 - examples/github-actions/**
-- .github/workflows/ci.yml
-- AGENT.md
-- CLAUDE.md
-- README.md
-- agent-md.toml.example
-- tests/**
+- memory/progress.md
+- memory/verify.md
 
 ## Next
 
-- Commit this completion claim as a child of bootstrap SHA `73748bf6c3d68be063d0ca80aa6e2c3470671977` without changing any trust anchor.
-- Push the child commit and require GitHub Actions success for that exact new SHA.
-- Run the trusted independent verifier and `agent-md verify`; accept this claim only if every applicable guarantee passes.
+- Run the pre-commit boundary and commit the corrected verifier as a new trust-anchor checkpoint.
+- After authorized push, require a later claim-only child so the corrected verifier does not attest its own change.
+- Require exact-SHA `completed/success` CI, then run the trusted verifier and `agent-md verify`.
 
 ## Blockers
 
-- Acceptance of this completion claim is pending external CI and an independent attestation bound to the child commit SHA.
+- The correction modifies a trust anchor and cannot attest its own checkpoint; a later unchanged-anchor child commit remains required.
 
 ## Recently Completed
 
+- Replaced the SC2015-prone verifier expression with an equivalent fail-closed conditional; exact ShellCheck and Bats 231/231 pass.
+- Proved the first child push triggered GitHub Actions for the exact SHA and that a failed run remains fail-closed.
 - Completed the local Root-of-Trust Bootstrap implementation and verification without using self-attestation or a bypass.
 - Created and pushed bootstrap checkpoint `73748bf`; doctor now reports the repo-local anchor eligible and clean against HEAD.
 - Confirmed the verifier still refuses self-attestation of its introducing commit and GitHub read-only queries expose no run for that SHA.
-- Restored working `gh` authentication without changing repository credentials or core behavior.
-- Formalized `done` as a completion claim accepted only by all applicable guarantees.
