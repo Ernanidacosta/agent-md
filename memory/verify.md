@@ -10,14 +10,14 @@
 
 - [x] GitHub Actions run `34279255376` was bound to child SHA `28ca69a` and exposed the SC2015 portability defect.
 - [x] The verifier rejected that failed run with exit 1 and emitted no passing attestation.
-- [ ] A later claim-only child commit receives `completed/success` CI for its exact SHA.
+- [ ] The later claim-only child commit receives `completed/success` CI for its exact SHA.
 
 ## Task-Specific Criteria
 
 - [x] Replaced the SC2015-prone boolean chain with an equivalent explicit conditional.
 - [x] Missing or `null` workflow references remain fail-closed.
 - [x] No workflow, provider contract, Risk, or trust policy was weakened.
-- [ ] Commit the corrected verifier as a new checkpoint before any later attestation attempt.
+- [x] Committed the corrected verifier as checkpoint `240637b` before the later attestation attempt.
 
 ## Independent Evidence
 
