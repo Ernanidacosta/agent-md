@@ -19,12 +19,30 @@ write_risk_config() {
     [ -z "$independent" ] || printf 'independent = "%s"\n' "$independent"
     [ -z "$approval" ] || printf 'approval = "%s"\n' "$approval"
     printf '\n[verify.policy]\nrequired = ["test"]\n'
+    if [[ "$independent" == ./* ]] || [[ "$approval" == ./* ]]; then
+      printf '\n[verify.attestation]\n'
+      [[ "$independent" != ./* ]] || printf 'independent_files = []\n'
+      [[ "$approval" != ./* ]] || printf 'approval_files = []\n'
+    fi
   } > agent-md.toml
 }
 
 commit_risk_baseline() {
   git add agent-md.toml memory/progress.md
+  [ ! -d scripts ] || git add scripts
   git commit -q -m baseline
+}
+
+write_risk_verifier() {
+  local path="$1" kind="$2" origin="$3" marker="${4:-}"
+  mkdir -p "$(dirname "$path")"
+  {
+    printf '#!/bin/bash\n'
+    [ -z "$marker" ] || printf 'touch %s\n' "$marker"
+    printf 'target=$(git rev-parse HEAD)\n'
+    printf 'printf '\''{"status":"pass","kind":"%s","origin":"%s","target":{"commit":"%%s"}}\\n'\'' "$target"\n' "$kind" "$origin"
+  } > "$path"
+  chmod +x "$path"
 }
 
 @test "low risk with required checks passing allows done" {
@@ -68,7 +86,8 @@ commit_risk_baseline() {
 }
 
 @test "high risk with trusted independent verifier allows done" {
-  write_risk_config true /bin/true
+  write_risk_verifier scripts/independent.sh independent ci
+  write_risk_config true ./scripts/independent.sh
   write_progress done "Harden authentication" "" high
   commit_risk_baseline
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
@@ -78,7 +97,8 @@ commit_risk_baseline() {
 }
 
 @test "critical risk without human approval blocks done" {
-  write_risk_config true /bin/true
+  write_risk_verifier scripts/independent.sh independent ci
+  write_risk_config true ./scripts/independent.sh
   write_progress done "Rotate production credentials" "" critical
   commit_risk_baseline
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
@@ -87,7 +107,9 @@ commit_risk_baseline() {
 }
 
 @test "critical risk with trusted independent and approval verifiers allows done" {
-  write_risk_config true /bin/true /bin/true
+  write_risk_verifier scripts/independent.sh independent ci
+  write_risk_verifier scripts/approval.sh approval human
+  write_risk_config true ./scripts/independent.sh ./scripts/approval.sh
   write_progress done "Rotate production credentials" "" critical
   commit_risk_baseline
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
@@ -97,7 +119,8 @@ commit_risk_baseline() {
 }
 
 @test "agent-authored human approval prose is never accepted as evidence" {
-  write_risk_config true /bin/true
+  write_risk_verifier scripts/independent.sh independent ci
+  write_risk_config true ./scripts/independent.sh
   write_progress done "Rotate production credentials" "" critical
   commit_risk_baseline
   cat > memory/approval.md <<'EOF'
@@ -112,14 +135,15 @@ EOF
 }
 
 @test "approval verifier added by the implementing agent is not trusted" {
-  write_risk_config true /bin/true
+  write_risk_verifier scripts/independent.sh independent ci
+  write_risk_config true ./scripts/independent.sh
   write_progress done "Rotate production credentials" "" critical
   commit_risk_baseline
-  write_risk_config true /bin/true /bin/true
+  write_risk_config true ./scripts/independent.sh /bin/true
   out=$(run_hook stop-verify.sh '{"stop_hook_active":false}')
   echo "$out" | jq -e '.decision == "block"' >/dev/null
-  echo "$out" | jq -e '.reason | test("RISK_HUMAN_APPROVAL_REQUIRED")' >/dev/null
-  echo "$out" | jq -e '.reason | test("not present unchanged in HEAD")' >/dev/null
+  echo "$out" | jq -e '.reason | test("RISK_ATTESTATION_UNTRUSTED")' >/dev/null
+  echo "$out" | jq -e '.reason | test("config-not-in-head")' >/dev/null
 }
 
 @test "missing risk on relevant legacy work warns without defaulting to low" {
@@ -234,14 +258,17 @@ EOF
 }
 
 @test "doctor reports risk requirements without executing evidence commands" {
-  write_risk_config true 'touch independent-ran' 'touch approval-ran'
+  write_risk_verifier scripts/independent.sh independent ci independent-ran
+  write_risk_verifier scripts/approval.sh approval human approval-ran
+  write_risk_config true ./scripts/independent.sh ./scripts/approval.sh
   write_progress done "Critical change" "" critical
   commit_risk_baseline
   run bash .agent-md/bin/doctor.sh
   [ "$status" -eq 0 ]
   echo "$output" | grep -Eq 'declared:[[:space:]]+critical'
-  echo "$output" | grep -Eq 'independent verification:[[:space:]]+configured, trusted'
-  echo "$output" | grep -Eq 'human approval:[[:space:]]+configured, trusted'
+  echo "$output" | grep -Eq 'Independent verifier:'
+  echo "$output" | grep -Eq 'Approval verifier:'
+  [ "$(echo "$output" | grep -c 'trust: eligible')" -eq 2 ]
   [ ! -e independent-ran ]
   [ ! -e approval-ran ]
 }

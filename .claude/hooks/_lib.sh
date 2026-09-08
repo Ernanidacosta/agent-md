@@ -315,7 +315,8 @@ verification_invalid_contract_json() {
 verification_contract_json() {
   local config="${1:-$(toml_path)}" required_values required_status
   local required_declared=0 timeout_value="" rows='[]' check command origin requirement
-  local seen_required="" value row
+  local seen_required="" value row trusted_values trusted_status trusted_files
+  local capability_values capability_status capabilities
 
   required_values=$(read_toml_array "$config" verify.policy required)
   required_status=$?
@@ -368,6 +369,8 @@ EOF
   while IFS= read -r check; do
     command=""
     origin="not configured"
+    trusted_files='[]'
+    capabilities='[]'
     if toml_key_present "$config" verify "$check"; then
       command=$(read_toml "$config" verify "$check")
       if [ -z "$command" ]; then
@@ -388,6 +391,70 @@ EOF
 
     if [ "$check" = independent ] || [ "$check" = approval ]; then
       requirement="conditional"
+      trusted_values=$(read_toml_array "$config" verify.attestation "${check}_files")
+      trusted_status=$?
+      case "$trusted_status" in
+        0)
+          while IFS= read -r value; do
+            [ -n "$value" ] || continue
+            case "$value" in
+              /*|..|../*|*/../*|*/..)
+                verification_invalid_contract_json \
+                  "Invalid ${config}: verify.attestation.${check}_files must contain repository-relative paths without traversal."
+                return 0
+                ;;
+            esac
+            if printf '%s' "$trusted_files" | jq -e --arg value "$value" 'index($value) != null' >/dev/null; then
+              verification_invalid_contract_json \
+                "Invalid ${config}: trusted attestation file '${value}' is duplicated for ${check}."
+              return 0
+            fi
+            trusted_files=$(printf '%s' "$trusted_files" | jq -c --arg value "$value" '. + [$value]')
+          done <<EOF
+$trusted_values
+EOF
+          ;;
+        1) ;;
+        *)
+          verification_invalid_contract_json \
+            "Invalid ${config}: verify.attestation.${check}_files must be an array of quoted repository-relative paths."
+          return 0
+          ;;
+      esac
+
+      capability_values=$(read_toml_array "$config" verify.attestation "${check}_capabilities")
+      capability_status=$?
+      case "$capability_status" in
+        0)
+          if [ "$origin" != configured ]; then
+            verification_invalid_contract_json \
+              "Invalid ${config}: verify.attestation.${check}_capabilities requires verify.${check}."
+            return 0
+          fi
+          while IFS= read -r value; do
+            [ -n "$value" ] || continue
+            if ! printf '%s\n' "$value" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._+-]*$'; then
+              verification_invalid_contract_json \
+                "Invalid ${config}: verify.attestation.${check}_capabilities must contain literal command names, not paths or shell expressions."
+              return 0
+            fi
+            if printf '%s' "$capabilities" | jq -e --arg value "$value" 'index($value) != null' >/dev/null; then
+              verification_invalid_contract_json \
+                "Invalid ${config}: attestation capability '${value}' is duplicated for ${check}."
+              return 0
+            fi
+            capabilities=$(printf '%s' "$capabilities" | jq -c --arg value "$value" '. + [$value]')
+          done <<EOF
+$capability_values
+EOF
+          ;;
+        1) ;;
+        *)
+          verification_invalid_contract_json \
+            "Invalid ${config}: verify.attestation.${check}_capabilities must be an array of quoted command names."
+          return 0
+          ;;
+      esac
     elif [ "$required_declared" -eq 1 ]; then
       if printf '%s\n' "$required_values" | grep -qxF "$check"; then
         requirement="required"
@@ -405,7 +472,10 @@ EOF
       --arg requirement "$requirement" \
       --arg origin "$origin" \
       --arg command "$command" \
-      '{name:$name, requirement:$requirement, origin:$origin, command:$command}')
+      --argjson trusted_files "$trusted_files" \
+      --argjson capabilities "$capabilities" \
+      '{name:$name, requirement:$requirement, origin:$origin, command:$command,
+        trusted_files:$trusted_files, capabilities:$capabilities}')
     rows=$(printf '%s' "$rows" | jq -c --argjson row "$row" '. + [$row]')
   done <<EOF
 $(verification_check_names)
@@ -626,6 +696,7 @@ run_verification_contract() {
 
 verification_result_human() {
   local result="$1" base check requirement origin command exit_code evidence truncated
+  local anchor_path anchor_location anchor_integrity anchor_trust attestation_kind attestation_origin attestation_commit
   base=$(policy_human_message "$result")
   check=$(printf '%s' "$result" | jq -r '.check // empty')
   requirement=$(printf '%s' "$result" | jq -r '.requirement // empty')
@@ -643,6 +714,21 @@ verification_result_human() {
   fi
   if [ "$truncated" = true ]; then
     printf 'Evidence truncated to 30 lines; rerun the command above for complete output.\n'
+  fi
+  anchor_path=$(printf '%s' "$result" | jq -r '.trust_anchor.path // empty')
+  if [ -n "$anchor_path" ]; then
+    anchor_location=$(printf '%s' "$result" | jq -r '.trust_anchor.location // "unknown"')
+    anchor_integrity=$(printf '%s' "$result" | jq -r '.trust_anchor.integrity // "unknown"')
+    anchor_trust=$(printf '%s' "$result" | jq -r '.trust_anchor.trust // "unknown"')
+    printf 'Trust anchor: %s (%s, %s, %s)\n' \
+      "$anchor_path" "$anchor_location" "$anchor_integrity" "$anchor_trust"
+  fi
+  attestation_kind=$(printf '%s' "$result" | jq -r '.attestation.kind // empty')
+  if [ -n "$attestation_kind" ]; then
+    attestation_origin=$(printf '%s' "$result" | jq -r '.attestation.origin // "unknown"')
+    attestation_commit=$(printf '%s' "$result" | jq -r '.attestation.target.commit // "unbound"')
+    printf 'Attestation: %s from %s for commit %s\n' \
+      "$attestation_kind" "$attestation_origin" "$attestation_commit"
   fi
 }
 
@@ -1018,11 +1104,10 @@ $signals
 EOF
 }
 
-# Evidence/approval verifiers are trusted only when their exact command was
-# already present in the factual HEAD version of agent-md.toml. This prevents
-# the implementing agent from adding a no-op verifier and self-attesting in
-# the same worktree. The configured command remains responsible for checking
-# its external CI/reviewer/human source.
+# The verifier declaration itself is trusted only when its exact command was
+# already present in the factual HEAD version of agent-md.toml. Full trust also
+# requires attestation_trust_anchor_json: this helper remains public for legacy
+# callers that only need the config-provenance predicate.
 risk_evidence_command_trusted() {
   local config="$1" check="$2" head_config head_command current_command
   case "$config" in /*|*'..'*) return 1 ;; esac
@@ -1043,13 +1128,369 @@ risk_evidence_command_trusted() {
   [ -n "$head_command" ] && [ "$head_command" = "$current_command" ]
 }
 
-risk_evidence_result() {
-  local contract="$1" check="$2" code="$3" risk="$4" current_status="$5"
-  local signals="$6" config="$7" spec origin command timeout_seconds check_result
-  local message suggestion result_status
+# attestation_anchor_result_json <eligible> <check> <command> <path>
+#   <location> <integrity> <executable> <reason> <trusted-files-json>
+attestation_anchor_result_json() {
+  local eligible="$1" check="$2" command="$3" path="$4" location="$5"
+  local integrity="$6" executable="$7" reason="$8" trusted_files="${9:-[]}"
+  jq -cn \
+    --argjson eligible "$eligible" --arg check "$check" --arg command "$command" \
+    --arg path "$path" --arg location "$location" --arg integrity "$integrity" \
+    --argjson executable "$executable" --arg reason "$reason" \
+    --argjson trusted_files "$trusted_files" '
+      {
+        eligible:$eligible,
+        check:$check,
+        command:$command,
+        path:$path,
+        location:$location,
+        integrity:$integrity,
+        executable:$executable,
+        trust:(if $eligible then "eligible" else "untrusted" end),
+        reason:$reason,
+        trusted_files:$trusted_files
+      }
+    '
+}
+
+attestation_command_is_direct_path() {
+  local command="$1"
+  [ -n "$command" ] || return 1
+  case "$command" in
+    *[[:space:]]*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'`'*|*'$'*|*'('*|*')'*|*'{'*|*'}'*) return 1 ;;
+  esac
+  return 0
+}
+
+attestation_path_has_traversal() {
+  case "$1" in ..|../*|*/../*|*/..) return 0 ;; esac
+  return 1
+}
+
+attestation_file_world_writable() {
+  local mode
+  mode=$(stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null) || return 1
+  case "$mode" in *[2367]) return 0 ;; esac
+  return 1
+}
+
+# attestation_trust_anchor_json <config> <independent|approval>
+# Performs read-only trust-anchor validation. Repo-local anchors and their
+# explicitly declared files must be ordinary, unchanged HEAD blobs. External
+# anchors are environment-managed: agent-md checks direct-path executability,
+# rejects symlinks and detectable executor/world-writable files or immediate
+# directories, but does not pretend to audit the wider host filesystem.
+attestation_trust_anchor_json() {
+  local config="$1" check="$2" command="" root path="" relative="" location="unknown"
+  local integrity="unknown" executable=false reason="" head_config current_files head_files
+  local current_status head_status trusted_files='[]' file mode resolved
+  local current_capabilities head_capabilities current_capability_status head_capability_status
+
+  case "$check" in independent|approval) ;;
+    *)
+      attestation_anchor_result_json false "$check" "" "" unknown invalid false invalid-kind
+      return 0
+      ;;
+  esac
+
+  command=$(read_toml "$config" verify "$check")
+  if [ -z "$command" ]; then
+    attestation_anchor_result_json false "$check" "" "" unknown missing false not-configured
+    return 0
+  fi
+  if ! risk_evidence_command_trusted "$config" "$check"; then
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown config-changed false config-not-in-head
+    return 0
+  fi
+  if ! attestation_command_is_direct_path "$command"; then
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown invalid false not-direct-path
+    return 0
+  fi
+  if attestation_path_has_traversal "$command"; then
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown invalid false path-traversal
+    return 0
+  fi
+
+  head_config=$(mktemp "${TMPDIR:-/tmp}/agent-md-head-config.XXXXXX") || {
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown unavailable false temp-unavailable
+    return 0
+  }
+  if ! git show "HEAD:${config}" > "$head_config" 2>/dev/null; then
+    rm -f "$head_config"
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown config-changed false config-not-in-head
+    return 0
+  fi
+  current_files=$(read_toml_array "$config" verify.attestation "${check}_files")
+  current_status=$?
+  head_files=$(read_toml_array "$head_config" verify.attestation "${check}_files")
+  head_status=$?
+  current_capabilities=$(read_toml_array "$config" verify.attestation "${check}_capabilities")
+  current_capability_status=$?
+  head_capabilities=$(read_toml_array "$head_config" verify.attestation "${check}_capabilities")
+  head_capability_status=$?
+  rm -f "$head_config"
+  if [ "$current_status" -ne "$head_status" ] || [ "$current_files" != "$head_files" ]; then
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown config-changed false trusted-files-config-changed
+    return 0
+  fi
+  if [ "$current_capability_status" -ne "$head_capability_status" ] \
+    || [ "$current_capabilities" != "$head_capabilities" ]; then
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown config-changed false capabilities-config-changed
+    return 0
+  fi
+  if [ "$current_status" -eq 0 ]; then
+    trusted_files=$(printf '%s' "$current_files" | jq -Rsc 'split("\n") | map(select(length > 0))')
+  fi
+
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown unavailable false not-in-git
+    return 0
+  }
+  root=$(cd "$root" 2>/dev/null && pwd -P) || {
+    attestation_anchor_result_json false "$check" "$command" "$command" unknown unavailable false root-unavailable
+    return 0
+  }
+
+  case "$command" in
+    /*) path="$command" ;;
+    */*) path="$root/${command#./}" ;;
+    *)
+      resolved=$(command -v "$command" 2>/dev/null || true)
+      case "$resolved" in /*) path="$resolved" ;; *) path="$command" ;; esac
+      ;;
+  esac
+
+  case "$path" in
+    "$root"/*)
+      location="repo-local"
+      relative=${path#"$root"/}
+      if [ "$current_status" -ne 0 ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" undeclared false trusted-files-not-declared "$trusted_files"
+        return 0
+      fi
+      if [ -L "$path" ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" symlink false symlink "$trusted_files"
+        return 0
+      fi
+      if [ ! -f "$path" ]; then
+        reason=missing
+        git cat-file -e "HEAD:${relative}" 2>/dev/null || reason=not-in-head
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" missing false "$reason" "$trusted_files"
+        return 0
+      fi
+      if ! git cat-file -e "HEAD:${relative}" 2>/dev/null; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" worktree-only false not-in-head "$trusted_files"
+        return 0
+      fi
+      mode=$(git ls-tree HEAD -- "$relative" | awk 'NR == 1 { print $1 }')
+      if [ "$mode" != 100755 ] || [ ! -x "$path" ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" mode-mismatch false not-executable "$trusted_files"
+        return 0
+      fi
+      if ! git diff --quiet HEAD -- "$relative"; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" modified true modified "$trusted_files"
+        return 0
+      fi
+      integrity="clean-vs-head"
+      executable=true
+      ;;
+    *)
+      location="external"
+      if [ -L "$path" ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" symlink false symlink "$trusted_files"
+        return 0
+      fi
+      if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" unavailable false missing-or-not-executable "$trusted_files"
+        return 0
+      fi
+      if attestation_file_world_writable "$path"; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" world-writable true world-writable "$trusted_files"
+        return 0
+      fi
+      if [ -w "$path" ] || [ -w "$(dirname "$path")" ]; then
+        attestation_anchor_result_json false "$check" "$command" "$path" "$location" executor-writable true executor-writable "$trusted_files"
+        return 0
+      fi
+      integrity="environment-managed"
+      executable=true
+      ;;
+  esac
+
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    if attestation_path_has_traversal "$file"; then
+      attestation_anchor_result_json false "$check" "$command" "$path" "$location" trusted-file-invalid "$executable" trusted-file-traversal "$trusted_files"
+      return 0
+    fi
+    file=${file#./}
+    if [ -L "$root/$file" ]; then
+      attestation_anchor_result_json false "$check" "$command" "$path" "$location" trusted-file-symlink "$executable" trusted-file-symlink "$trusted_files"
+      return 0
+    fi
+    if [ ! -f "$root/$file" ] || ! git cat-file -e "HEAD:${file}" 2>/dev/null; then
+      attestation_anchor_result_json false "$check" "$command" "$path" "$location" trusted-file-missing "$executable" trusted-file-not-in-head "$trusted_files"
+      return 0
+    fi
+    if ! git diff --quiet HEAD -- "$file"; then
+      attestation_anchor_result_json false "$check" "$command" "$path" "$location" trusted-file-modified "$executable" trusted-file-modified "$trusted_files"
+      return 0
+    fi
+  done <<EOF
+$current_files
+EOF
+
+  attestation_anchor_result_json true "$check" "$command" "$path" "$location" "$integrity" "$executable" eligible "$trusted_files"
+}
+
+attestation_current_target_json() {
+  local scope="${1:-worktree}" relevant_files status head
+  head=$(git rev-parse --verify HEAD 2>/dev/null) || {
+    jq -cn '{eligible:false, binding:"none", reason:"head-unavailable", relevant_paths:[]}'
+    return 0
+  }
+  relevant_files=$(risk_changed_files "$scope")
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    jq -cn '{eligible:false, binding:"none", reason:"classifier-unavailable", relevant_paths:[]}'
+    return 0
+  fi
+  if [ -n "$relevant_files" ]; then
+    jq -cn --arg commit "$head" \
+      --argjson paths "$(printf '%s' "$relevant_files" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+      '{eligible:false, binding:"unsupported-dirty-worktree", reason:"operational-worktree-dirty",
+        commit:$commit, relevant_paths:$paths}'
+    return 0
+  fi
+  jq -cn --arg commit "$head" \
+    '{eligible:true, binding:"commit", commit:$commit, relevant_paths:[]}'
+}
+
+attestation_execution_json() {
+  local anchor="$1" timeout_seconds="${2:-}" path stdout_file stderr_file exit_code
+  local timeout_command="" stdout stderr stdout_lines stderr_lines truncated=false
+  path=$(printf '%s' "$anchor" | jq -r '.path')
+  stdout_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-attestation-out.XXXXXX") || return 1
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/agent-md-attestation-err.XXXXXX") || {
+    rm -f "$stdout_file"
+    return 1
+  }
+  if [ -n "$timeout_seconds" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout_command=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+      timeout_command=gtimeout
+    else
+      rm -f "$stdout_file" "$stderr_file"
+      jq -cn '{exit_code:127, stdout:"", stderr:"timeout utility unavailable", truncated:false}'
+      return 0
+    fi
+    if "$timeout_command" "${timeout_seconds}s" "$path" >"$stdout_file" 2>"$stderr_file"; then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
+  elif "$path" >"$stdout_file" 2>"$stderr_file"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+  stdout_lines=$(wc -l < "$stdout_file" | tr -d ' ')
+  stderr_lines=$(wc -l < "$stderr_file" | tr -d ' ')
+  stdout=$(awk 'NR <= 30' "$stdout_file")
+  stderr=$(awk 'NR <= 30' "$stderr_file")
+  if [ "${stdout_lines:-0}" -gt 30 ] || [ "${stderr_lines:-0}" -gt 30 ]; then truncated=true; fi
+  rm -f "$stdout_file" "$stderr_file"
+  jq -cn --argjson exit_code "$exit_code" --arg stdout "$stdout" --arg stderr "$stderr" \
+    --argjson truncated "$truncated" \
+    '{exit_code:$exit_code, stdout:$stdout, stderr:$stderr, truncated:$truncated}'
+}
+
+attestation_risk_result_json() {
+  local result_status="$1" severity="$2" code="$3" message="$4" suggestion="$5"
+  local risk="$6" current_status="$7" signals="$8" check="$9" anchor="${10}"
+  local target="${11:-null}" attestation="${12:-null}" execution="${13:-null}" base
+  base=$(risk_result_json "$result_status" "$severity" "$code" "$message" "$suggestion" \
+    "$risk" "$current_status" "$signals" "" "$check")
+  jq -cn --argjson base "$base" --arg check "$check" --argjson anchor "$anchor" \
+    --argjson target "$target" --argjson attestation "$attestation" --argjson execution "$execution" '
+      $base + {
+        check:$check,
+        requirement:"required",
+        origin:$anchor.location,
+        command:$anchor.command,
+        trust_anchor:$anchor
+      }
+      + if $target == null then {} else {current_target:$target} end
+      + if $attestation == null then {} else {attestation:$attestation} end
+      + if $execution == null then {} else {
+          exit_code:$execution.exit_code,
+          evidence:([$execution.stdout, $execution.stderr] | map(select(length > 0)) | join("\n")),
+          truncated:$execution.truncated
+        } end
+    '
+}
+
+# attestation_missing_capabilities <verification-contract-json> <check>
+# Prints configured command capabilities that are absent from PATH. Capability
+# names are diagnostic metadata only: providers remain outside the generic core.
+attestation_missing_capabilities() {
+  local contract="$1" check="$2" capability
+  while IFS= read -r capability; do
+    [ -n "$capability" ] || continue
+    command -v "$capability" >/dev/null 2>&1 || printf '%s\n' "$capability"
+  done < <(printf '%s' "$contract" | jq -r --arg check "$check" \
+    '.checks[] | select(.name == $check) | .capabilities[]?')
+}
+
+risk_attestation_capability_warning() {
+  local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5"
+  local spec origin missing message suggestion
+  spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
+  origin=$(printf '%s' "$spec" | jq -r '.origin // "not configured"')
+  [ "$origin" = configured ] || return 0
+  missing=$(attestation_missing_capabilities "$contract" "$check")
+  [ -n "$missing" ] || return 0
+  message="Configured verify.${check} is currently unavailable; required capability missing: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }')."
+  suggestion="Install or expose the declared capability before requesting final '${check}' evidence; ordinary work may continue."
+  risk_result_json warn warning VERIFY_UNAVAILABLE "$message" "$suggestion" \
+    "$risk" "$current_status" "$signals" "" "${check}-capability"
+}
+
+risk_attestation_integrity_result() {
+  local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5" config="$6"
+  local spec origin anchor message suggestion
   spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
   origin=$(printf '%s' "$spec" | jq -r '.origin')
-  command=$(printf '%s' "$spec" | jq -r '.command')
+  [ "$origin" = configured ] || return 0
+  anchor=$(attestation_trust_anchor_json "$config" "$check")
+  [ "$(printf '%s' "$anchor" | jq -r '.eligible')" = true ] && return 0
+  message="Configured verify.${check} is not an eligible trust anchor: $(printf '%s' "$anchor" | jq -r '.reason')."
+  suggestion="Restore the verifier and declared files to reviewed HEAD content before committing."
+  attestation_risk_result_json fail error RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
+    "$risk" "$current_status" "$signals" "$check" "$anchor"
+}
+
+risk_attestation_integrity_warning() {
+  local contract="$1" check="$2" risk="$3" current_status="$4" signals="$5" config="$6"
+  local spec origin anchor message suggestion
+  spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
+  origin=$(printf '%s' "$spec" | jq -r '.origin')
+  [ "$origin" = configured ] || return 0
+  anchor=$(attestation_trust_anchor_json "$config" "$check")
+  [ "$(printf '%s' "$anchor" | jq -r '.eligible')" = true ] && return 0
+  message="Configured verify.${check} is not yet an eligible trust anchor: $(printf '%s' "$anchor" | jq -r '.reason')."
+  suggestion="Commit and review the trust anchor as a baseline; do not use it to attest the same change that introduces or modifies it."
+  attestation_risk_result_json warn warning RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
+    "$risk" "$current_status" "$signals" "$check" "$anchor"
+}
+
+risk_evidence_result() {
+  local contract="$1" check="$2" code="$3" risk="$4" current_status="$5"
+  local signals="$6" config="$7" scope="${8:-worktree}" spec origin timeout_seconds
+  local message suggestion anchor anchor_after target execution attestation value expected_commit missing
+  spec=$(printf '%s' "$contract" | jq -c --arg check "$check" '.checks[] | select(.name == $check)')
+  origin=$(printf '%s' "$spec" | jq -r '.origin')
   if [ "$origin" != configured ]; then
     message="Risk '${risk}' requires '${check}' evidence from a configured verifier."
     suggestion="Configure a trusted verify.${check} command in a reviewed baseline, provide the external evidence, and rerun verification."
@@ -1057,37 +1498,109 @@ risk_evidence_result() {
       "$risk" "$current_status" "$signals" "" "$check"
     return 0
   fi
-  if ! risk_evidence_command_trusted "$config" "$check"; then
-    message="Risk '${risk}' cannot trust verify.${check} because its command was not present unchanged in HEAD."
-    suggestion="Have the project owner review and establish the verifier before using it as independent evidence."
-    risk_result_json fail error "$code" "$message" "$suggestion" \
-      "$risk" "$current_status" "$signals" "$config" "$check"
+
+  anchor=$(attestation_trust_anchor_json "$config" "$check")
+  if [ "$(printf '%s' "$anchor" | jq -r '.eligible')" != true ]; then
+    message="Risk '${risk}' cannot trust verify.${check}: trust anchor $(printf '%s' "$anchor" | jq -r '.reason')."
+    suggestion="Restore the reviewed verifier and declared files to their HEAD content, or establish a trusted external verifier."
+    attestation_risk_result_json fail error RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor"
     return 0
   fi
 
-  spec=$(printf '%s' "$spec" | jq -c '.requirement = "required"')
+  missing=$(attestation_missing_capabilities "$contract" "$check")
+  if [ -n "$missing" ]; then
+    message="Risk '${risk}' requires '${check}' evidence, but its verifier capability is unavailable: $(printf '%s' "$missing" | awk 'BEGIN { first=1 } { if (!first) printf ", "; printf "%s", $0; first=0 } END { print "" }')."
+    suggestion="Install or expose the declared capability and rerun verification; agent-md will not install provider dependencies automatically."
+    attestation_risk_result_json fail error VERIFY_UNAVAILABLE "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor"
+    return 0
+  fi
+
+  target=$(attestation_current_target_json "$scope")
+  if [ "$(printf '%s' "$target" | jq -r '.eligible')" != true ]; then
+    message="Risk '${risk}' cannot bind '${check}' evidence while operationally relevant worktree changes are uncommitted."
+    suggestion="Commit the reviewed operational change, obtain an attestation for that exact commit, and rerun verification."
+    attestation_risk_result_json fail error RISK_ATTESTATION_UNBOUND "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target"
+    return 0
+  fi
+
   timeout_seconds=$(printf '%s' "$contract" | jq -r '.timeout_seconds // empty')
-  check_result=$(run_verification_check "$spec" "$timeout_seconds")
-  result_status=$(printf '%s' "$check_result" | jq -r '.status')
-  if [ "$result_status" = pass ]; then
-    printf '%s\n' "$check_result"
+  execution=$(attestation_execution_json "$anchor" "$timeout_seconds") || {
+    message="The '${check}' attestation verifier could not create diagnostic output storage."
+    suggestion="Check temporary-directory permissions and rerun verification."
+    attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target"
+    return 0
+  }
+  anchor_after=$(attestation_trust_anchor_json "$config" "$check")
+  if [ "$(printf '%s' "$anchor_after" | jq -r '.eligible')" != true ]; then
+    message="The verify.${check} trust anchor changed while its attestation was being evaluated."
+    suggestion="Restore the reviewed verifier and declared files to HEAD, then rerun verification without concurrent modification."
+    attestation_risk_result_json fail error RISK_ATTESTATION_UNTRUSTED "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor_after" "$target" null "$execution"
+    return 0
+  fi
+  if [ "$(printf '%s' "$execution" | jq -r '.exit_code')" -ne 0 ]; then
+    message="The trusted '${check}' verifier exited nonzero; output text cannot override its exit status."
+    suggestion="Recover the external evidence and rerun the verifier for the current target."
+    attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" null "$execution"
     return 0
   fi
 
-  message="Risk '${risk}' requires passing '${check}' evidence, but the trusted verifier did not pass."
-  suggestion="Satisfy the external ${check} verifier and rerun verification."
-  risk_result_json fail error "$code" "$message" "$suggestion" \
-    "$risk" "$current_status" "$signals" "" "$check" \
-    | jq -c --argjson check_result "$check_result" '
-        . + {
-          check:$check_result.check,
-          requirement:"required",
-          origin:$check_result.origin,
-          command:$check_result.command,
-          evidence:$check_result.evidence,
-          truncated:$check_result.truncated
-        } + if $check_result.exit_code == null then {} else {exit_code:$check_result.exit_code} end
-      '
+  attestation=$(printf '%s' "$execution" | jq -r '.stdout' \
+    | jq -c -s 'if length == 1 and (.[0] | type) == "object" then .[0] else empty end' 2>/dev/null)
+  if [ -z "$attestation" ] || [ "$(printf '%s' "$attestation" | jq -r '.status // empty')" != pass ]; then
+    message="The trusted '${check}' verifier did not emit one structured passing attestation."
+    suggestion="Emit exactly one JSON object with status, kind, origin, and target for the current commit."
+    attestation_risk_result_json fail error RISK_ATTESTATION_INVALID "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" null "$execution"
+    return 0
+  fi
+
+  value=$(printf '%s' "$attestation" | jq -r '.kind // empty')
+  if [ "$value" != "$check" ]; then
+    message="The '${check}' verifier emitted kind '${value:-missing}', which cannot satisfy '${check}'."
+    suggestion="Return kind '${check}'; independent evidence and human approval are distinct requirements."
+    attestation_risk_result_json fail error RISK_ATTESTATION_KIND_MISMATCH "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
+    return 0
+  fi
+
+  value=$(printf '%s' "$attestation" | jq -r '.origin // empty')
+  case "$check:$value" in
+    independent:ci|independent:reviewer|independent:human|independent:external-harness|independent:trusted-local-verifier|approval:human) ;;
+    *)
+      message="The '${check}' attestation origin '${value:-missing}' is not allowed for this requirement."
+      suggestion="Use an allowed structured origin backed by the configured trust anchor."
+      attestation_risk_result_json fail error RISK_ATTESTATION_ORIGIN_INVALID "$message" "$suggestion" \
+        "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
+      return 0
+      ;;
+  esac
+
+  expected_commit=$(printf '%s' "$target" | jq -r '.commit')
+  value=$(printf '%s' "$attestation" | jq -r '.target.commit // empty')
+  if [ -z "$value" ]; then
+    message="The '${check}' attestation has no supported target.commit binding."
+    suggestion="Bind the attestation to the exact full HEAD commit and rerun verification."
+    attestation_risk_result_json fail error RISK_ATTESTATION_UNBOUND "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
+    return 0
+  fi
+  if [ "$value" != "$expected_commit" ]; then
+    message="The '${check}' attestation targets a different commit and is stale for the current state."
+    suggestion="Obtain fresh evidence bound to commit ${expected_commit}."
+    attestation_risk_result_json fail error RISK_ATTESTATION_STALE "$message" "$suggestion" \
+      "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
+    return 0
+  fi
+
+  message="Trusted '${check}' attestation passed for commit ${expected_commit}."
+  attestation_risk_result_json pass info VERIFY_PASSED "$message" "" \
+    "$risk" "$current_status" "$signals" "$check" "$anchor" "$target" "$attestation" "$execution"
 }
 
 risk_summary_json() {
@@ -1174,7 +1687,55 @@ run_risk_contract() {
     results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
   fi
 
-  if [ "$boundary" != completion ] || [ "$current_status" != "done" ] \
+  # Missing provider tooling is diagnostic while work is active/verifying.
+  # It becomes blocking only when Status: done claims the corresponding
+  # high/critical guarantee. The core knows command capabilities, not providers.
+  contract=$(printf '%s' "$verification_summary" | jq -c '.contract')
+  if [ "$current_status" != "done" ] && [ "$(printf '%s' "$contract" | jq -r '.valid')" = true ]; then
+    case "$risk" in
+      high|critical)
+        config=$(toml_path)
+        result=$(risk_attestation_integrity_warning "$contract" independent \
+          "$risk" "$current_status" "$signals" "$config")
+        [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+        result=$(risk_attestation_capability_warning "$contract" independent \
+          "$risk" "$current_status" "$signals")
+        [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+        ;;
+    esac
+    if [ "$risk" = critical ]; then
+      result=$(risk_attestation_integrity_warning "$contract" approval \
+        "$risk" "$current_status" "$signals" "$config")
+      [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      result=$(risk_attestation_capability_warning "$contract" approval \
+        "$risk" "$current_status" "$signals")
+      [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+    fi
+  fi
+
+  if [ "$boundary" != completion ]; then
+    if [ "$boundary" = advisory ] && [ "$current_status" = "done" ] \
+      && [ "$(printf '%s' "$verification_summary" | jq -r '.status')" != fail ]; then
+      contract=$(printf '%s' "$verification_summary" | jq -c '.contract')
+      config=$(toml_path)
+      case "$risk" in
+        high|critical)
+          result=$(risk_attestation_integrity_result "$contract" independent \
+            "$risk" "$current_status" "$signals" "$config")
+          [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+          ;;
+      esac
+      if [ "$risk" = critical ]; then
+        result=$(risk_attestation_integrity_result "$contract" approval \
+          "$risk" "$current_status" "$signals" "$config")
+        [ -z "$result" ] || results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
+      fi
+    fi
+    risk_summary_json "$results" "$risk" "$current_status" "$signals"
+    return 0
+  fi
+
+  if [ "$current_status" != "done" ] \
     || [ "$(printf '%s' "$verification_summary" | jq -r '.status')" = fail ]; then
     risk_summary_json "$results" "$risk" "$current_status" "$signals"
     return 0
@@ -1205,14 +1766,14 @@ run_risk_contract() {
   case "$risk" in
     high|critical)
       result=$(risk_evidence_result "$contract" independent \
-        RISK_INDEPENDENT_VERIFICATION_REQUIRED "$risk" "$current_status" "$signals" "$config")
+        RISK_INDEPENDENT_VERIFICATION_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope")
       results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
       ;;
   esac
 
   if [ "$risk" = critical ]; then
     result=$(risk_evidence_result "$contract" approval \
-      RISK_HUMAN_APPROVAL_REQUIRED "$risk" "$current_status" "$signals" "$config")
+      RISK_HUMAN_APPROVAL_REQUIRED "$risk" "$current_status" "$signals" "$config" "$scope")
     results=$(printf '%s' "$results" | jq -c --argjson result "$result" '. + [$result]')
   fi
 

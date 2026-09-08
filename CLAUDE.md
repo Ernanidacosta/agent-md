@@ -81,11 +81,11 @@ than blocks because Git cannot prove that no uncommitted intermediate
 state existed; do not add hidden persistence to guess.
 
 `Status: verifying` means implementation is ready and applicable checks
-are pending or being evaluated. `Status: done` is not proof by itself:
-at a completion boundary, the current required verification contract must
-run successfully. agent-md deliberately does not persist agent-authored
-`pass` claims in `progress.md`; fresh command exit status is stronger
-evidence and avoids duplicating CI or building a verification log.
+are pending or being evaluated. Status: done is a completion claim, not proof of completion.
+A done claim is accepted only after all applicable state integrity, required verification, Risk, attestation, and approval requirements pass.
+agent-md deliberately does not persist agent-authored `pass` claims in
+`progress.md`; fresh command exit status is stronger evidence and avoids
+duplicating CI or building a verification log.
 
 `Scope` is a focus-control signal, not a sandbox or safety boundary.
 Out-of-scope operational changes produce a warning. Scope never replaces
@@ -116,13 +116,70 @@ warnings, not classifications. Review `RISK_POSSIBLY_UNDERRATED`; do not treat
 it as proof that a particular level is correct.
 
 High/critical independent evidence is provided by `verify.independent`;
-critical human approval is validated by `verify.approval`. These are trusted
-project-configured commands, not prose claims. Their exact command must
-already exist unchanged in the committed `agent-md.toml` at `HEAD`, and each
-verifier must validate its own external source such as CI, a reviewer,
-independent harness, signed approval, or host workflow. A newly added command,
-an agent-authored `By: human`, or an agent saying “approved” is not evidence.
-If no reliable approval verifier exists, a critical task remains blocked.
+critical human approval is validated separately by `verify.approval`. A
+different check run by the executor is not independent evidence. Both commands
+must be direct executable paths already present unchanged in the committed
+`agent-md.toml` at `HEAD`; prose, booleans, worktree artifacts, and agent claims
+are never attestations. An agent-authored approval is not evidence.
+
+An attestation is trusted only when its origin, integrity, freshness, and
+binding are all sufficient. The verifier emits exactly one JSON object with
+`status: pass`, the expected `kind` (`independent` or `approval`), an allowed
+structured `origin`, and `target.commit` equal to the full current HEAD. The
+worktree must have no uncommitted operationally relevant changes; ignored
+metadata does not invalidate binding. agent-md deliberately requires a clean
+commit rather than claiming a worktree fingerprint it cannot prove reliably.
+The origin string is metadata, not authority by itself: the pre-established
+verifier must actually validate the CI, reviewer, human, or harness source.
+
+Repo-local verifier executables must be ordinary executable files present and
+unchanged in HEAD, never symlinks or traversal paths. Every repo-local file the
+verifier relies on must be listed in the reviewed
+`verify.attestation.<kind>_files` array and must also match HEAD. The array is
+required for a repo-local verifier; an explicit empty array asserts that the
+executable has no other repo-local dependencies. This explicit
+trust set avoids a fragile shell-import resolver. External verifiers are host
+trust anchors: agent-md checks that they are direct executable files, rejects
+symlinks and detectable executor/world-writable paths, and leaves broader host
+ownership and mount integrity to the environment. If reliable independent or
+approval verification is unavailable, high/critical completion remains
+blocked.
+
+A verifier cannot bootstrap trust in the same untrusted change that introduces
+or modifies it. Provider-specific verifiers may depend on external capabilities
+declared through `verify.attestation.<kind>_capabilities`; missing capabilities
+are warnings during ordinary `active`/`verifying` work and block only the final
+Risk guarantee that requires them. The generic core never installs provider
+tools, authenticates providers, or learns provider APIs. A GitHub Actions
+reference verifier lives under `examples/github-actions/`; other providers can
+implement the same JSON attestation contract without core changes.
+
+#### Root-of-Trust Bootstrap
+
+A new or modified trust anchor begins untrusted and cannot validate its own
+introduction. The initial root of trust is established by human or operational review outside the executor:
+
+```text
+untrusted verifier change
+        -> human review
+        -> checkpoint commit
+        -> verifier, config, dependencies, and workflow become the HEAD baseline
+        -> future commit
+        -> external CI
+        -> SHA-bound attestation
+        -> verification
+```
+
+The bootstrap commit may use its CI result as diagnostic information, but not
+as independent evidence approving that same trust-anchor change. There is no trust bypass,
+automatic baseline, force-trust flag, skip-attestation path, or executor
+self-approval. After an externally reviewed checkpoint, doctor may report the
+anchor eligible only while its path, declared dependencies, workflow, HEAD
+content, and required capabilities still satisfy the normal trust checks.
+
+A previously valid attestation stops satisfying the requirement when its exact
+target changes or its verifier, declared dependency, or workflow trust anchor
+changes. Commit binding, not a timestamp, is the primary freshness guarantee.
 
 Final Risk requirements apply only to `Status: done`. Missing evidence must
 not block ordinary work in `active`, `blocked`, or `verifying`. Safety remains
@@ -516,6 +573,10 @@ lint_file = "npx --no-install eslint {file}"
 [verify.policy]
 required = ["lint", "test", "smoke"]
 timeout_seconds = 300
+
+[verify.attestation]
+independent_files = ["scripts/ci-attestation.conf", ".github/workflows/ci.yml"]
+independent_capabilities = ["gh"]
 
 [visual]
 required          = true

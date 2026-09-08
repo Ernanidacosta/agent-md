@@ -2,33 +2,37 @@
 
 ## Current Phase
 
-Scale completion evidence and approval requirements through a small,
-explicit, non-numeric Risk Model without judging implementation safety.
+Close the Root-of-Trust Bootstrap contract semantically and operationally while
+keeping the current high-risk task in `verifying` until external human review.
 
 ## Implementation Slices
 
-1. [x] Establish failing evidence for Risk parsing, observable signals,
-   final-state requirements, and trusted evidence verifiers.
-2. [x] Add line-oriented Risk parsing and shared non-numeric evaluation.
-3. [x] Reuse the evaluation from Stop, verify, pre-commit, and doctor without
-   changing Safety behavior or invoking reviewers.
-4. [x] Document migration, limitations, and run the complete acceptance matrix.
+1. [x] Establish failing directive evidence for the complete `done claim` and
+   named out-of-band Root-of-Trust Bootstrap semantics.
+2. [x] Document bootstrap flow, future high-risk cycle, evidence invalidation,
+   and the absence of generic trust bypasses.
+3. [x] Re-run the complete acceptance contract and preserve `verifying` for the
+   external checkpoint handoff.
 
 ## Decisions Still In Force
 
-- Risk is declared once in `progress.md`; signals only audit possible
-  underrating and never rewrite the declaration.
-- Risk selects evidence/review/approval requirements, not whether code is safe.
-- Independent and human-approval evidence are validated only by pre-existing,
-  project-configured verifier commands; free-form agent claims are never proof.
-- Missing runtime applicability remains advisory when no runtime/smoke check
-  is declared because agent-md cannot infer semantics safely.
+- GitHub-specific repository/workflow selection lives beside the example,
+  never in the generic core schema.
+- `done` is only a claim until state, verification, Risk, attestation, and
+  approval requirements accept it.
+- Human/operational review outside the executor establishes the initial root;
+  no current-change autoattestation can substitute for that checkpoint.
+- A new target commit or a changed verifier, dependency, config, or workflow
+  invalidates earlier evidence; commit binding is primary over timestamps.
+- `gh` remains a provider capability, not a core dependency.
 
 ## Deferred / Out of Scope
 
 - Policy profiles, autonomy modes, numeric scoring, or decision engines.
-- Reviewer/model orchestration, broad self-test, caching, and automatic risk
-  classification.
+- Reviewer/model orchestration, PKI, signatures, trust stores, or daemons.
+- GitHub-specific logic inside core, remote writes, branch-policy mutation, or
+  support for every fork/PR topology.
+- A shell dependency resolver or worktree-attestation fingerprint.
 - Runtime ICM dependency or a new historical-memory layer.
 
 ## Open Questions

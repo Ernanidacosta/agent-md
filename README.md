@@ -159,6 +159,12 @@ Stable codes currently emitted by controls are deliberately limited:
 | `RISK_RUNTIME_EVIDENCE_REQUIRED` | Integrity or Quality | `error` when applicable evidence fails; otherwise `warning` |
 | `RISK_INDEPENDENT_VERIFICATION_REQUIRED` | Integrity | `error` |
 | `RISK_HUMAN_APPROVAL_REQUIRED` | Integrity | `error` |
+| `RISK_ATTESTATION_UNTRUSTED` | Integrity | `error` |
+| `RISK_ATTESTATION_INVALID` | Integrity | `error` |
+| `RISK_ATTESTATION_STALE` | Integrity | `error` |
+| `RISK_ATTESTATION_UNBOUND` | Integrity | `error` |
+| `RISK_ATTESTATION_KIND_MISMATCH` | Integrity | `error` |
+| `RISK_ATTESTATION_ORIGIN_INVALID` | Integrity | `error` |
 | `QUALITY_OUT_OF_SCOPE_CHANGE` | Quality | `warning` |
 | `QUALITY_TDD_COVERAGE_RECOMMENDED` | Quality | `warning` |
 | `QUALITY_VISUAL_EVIDENCE_RECOMMENDED` | Quality | `warning` |
@@ -300,9 +306,11 @@ is valid.
 | exit `126`/`127` or no required command | `VERIFY_UNAVAILABLE`, blocks | `VERIFY_UNAVAILABLE`, warns |
 | configured timeout exceeded | `VERIFY_TIMEOUT`, blocks | `VERIFY_TIMEOUT`, warns |
 
-Exit status is the primary evidence. Output containing `PASS` cannot rescue
-exit 1, and output containing `FAIL` does not override exit 0. Output is
-captured only for concise diagnosis and is never evaluated as a command.
+Exit status is the primary evidence for ordinary checks. Output containing
+`PASS` cannot rescue exit 1, and output containing `FAIL` does not override
+exit 0. Conditional attestation verifiers are stricter: exit 0 is necessary
+but must also accompany the structured JSON contract documented below. Output
+is captured only for concise diagnosis and is never evaluated as a command.
 `agent-md.toml` is trusted project configuration containing executable shell
 commands; do not populate it from untrusted external or natural-language
 output.
@@ -392,17 +400,169 @@ approval = "./scripts/verify-human-approval.sh"
 
 [verify.policy]
 required = ["test"]
+
+[verify.attestation]
+independent_files = ["scripts/attestation-lib.sh"]
+approval_files = ["scripts/attestation-lib.sh"]
+independent_capabilities = ["gh"]
 ```
 
 `independent` and `approval` do not belong in `verify.policy.required`; Risk
-activates them only for a final `Status: done`. To prevent same-task
-self-attestation, their exact command must already exist unchanged in the
-committed `agent-md.toml` at `HEAD`. The command must validate its own trusted
-external source: CI, a separate reviewer/harness, signed human approval, or a
-host approval workflow. agent-md trusts its exit code, not natural-language
-output. Adding `approval = "true"` in the current worktree, writing
-`By: human`, or claiming approval in chat is never accepted. Without a
-reliable configured approval verifier, critical remains blocked.
+activates them only for a final `Status: done`. A different command rerun by
+the same executor is not automatically independent. Each verifier must be a
+direct executable path whose exact declaration already exists unchanged in
+the committed `agent-md.toml` at `HEAD`; shell pipelines, inline commands, and
+free-form approval prose are not trust anchors.
+
+### Attestation trust contract
+
+An attestation must satisfy four properties:
+
+- **origin** — a small allowed value identifies CI, reviewer, human, external
+  harness, or trusted local verifier provenance;
+- **integrity** — the executor cannot modify the verifier or its declared
+  repo-local dependencies without invalidating trust;
+- **freshness** — evidence for an earlier code state becomes stale;
+- **binding** — evidence names the exact full HEAD commit it covers.
+
+The verifier writes exactly one JSON object to stdout:
+
+```json
+{
+  "status": "pass",
+  "kind": "independent",
+  "origin": "ci",
+  "target": {
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  }
+}
+```
+
+`kind` must match the configured slot. Independent origins are `ci`,
+`reviewer`, `human`, `external-harness`, or `trusted-local-verifier`; approval
+requires `origin: human`. Approval never substitutes for independent evidence,
+so critical requires two valid attestations. The origin value is constrained
+metadata, not proof by itself; the pre-established verifier remains responsible
+for validating the real external authority. Optional `reference`, `message`,
+and `timestamp` fields may aid diagnosis but timestamp is not binding.
+
+For a repo-local verifier, the executable must be an ordinary executable blob
+present and unchanged in HEAD. Symlinks, path traversal, worktree-only files,
+mode changes, and staged or unstaged content changes are rejected. Because
+agent-md does not attempt unsafe shell-import analysis, every repo-local file
+on which a verifier depends must be explicitly listed in the reviewed
+`[verify.attestation]` array for that slot. The key is mandatory for a
+repo-local verifier; `independent_files = []` explicitly asserts that only the
+verifier executable is involved. Those arrays and files must also match HEAD.
+
+An absolute verifier outside the repository is classified as `external`.
+agent-md verifies that it exists, is executable, is not a symlink, and is not
+detectably world- or executor-writable (including its immediate directory).
+Broader ownership, mount, package, and parent-directory security belong to the
+host. `doctor.sh` reports this as `environment-managed`; it does not claim to
+audit the host.
+
+Binding is deliberately conservative. If the shared classifier sees any
+uncommitted operationally relevant path, strong high/critical attestation is
+`RISK_ATTESTATION_UNBOUND`; commit the reviewed change and obtain evidence for
+that exact HEAD. Ignored metadata such as Markdown does not invalidate the
+binding. agent-md does not implement a worktree fingerprint in this phase,
+because a weak fingerprint would create false confidence. An attestation for
+a different commit is `RISK_ATTESTATION_STALE`.
+
+Adding `approval = "true"`, creating `approval.json`, writing `By: human`, or
+claiming approval in chat is never accepted. Invalid JSON, missing target,
+wrong kind/origin, nonzero exit, and a verifier changed before or during
+evaluation all fail closed. Without reliable configured anchors, high or
+critical completion remains blocked.
+
+Migration from the earlier Risk Model is explicit: an exit-only verifier no
+longer satisfies high/critical completion. Update it to emit the JSON contract;
+for each repo-local verifier, add and review its corresponding
+`verify.attestation.*_files` array (`[]` when there are no extra repo-local
+dependencies), then commit that baseline before trusting it. Existing project
+configuration is not rewritten automatically.
+
+Provider dependencies may be declared as literal command names through
+`verify.attestation.independent_capabilities` or
+`verify.attestation.approval_capabilities`. This is generic diagnostic metadata,
+not a provider schema and not a command for the core to execute. Doctor reports
+availability without running the verifier. A missing capability is a warning
+while work is `active`, `blocked`, or `verifying`; it blocks `done` only when
+the current Risk requires that attestation. agent-md never installs or
+authenticates provider tooling automatically. Capability declarations are part
+of the reviewed trust configuration and must match HEAD.
+
+### GitHub Actions reference verifier
+
+[`examples/github-actions/`](examples/github-actions/) contains a provider-side
+reference implementation built on `gh api`. It asks the official workflow-runs
+API for one explicitly configured workflow and the exact full current HEAD,
+then deterministically selects the newest matching run. Only
+`status=completed` with `conclusion=success` emits the generic independent
+attestation. Pending, absent, failed, cancelled, timed-out, malformed, or
+wrong-SHA results fail without a passing attestation.
+
+GitHub-specific repository/workflow selection, authentication, and API parsing
+stay in the example. The core still sees only a direct trust anchor, declared
+repo-local dependencies, external command capabilities, and the generic JSON
+attestation contract. There is no `[github]` section, hidden `curl` fallback,
+HTML scraping, token persistence, or automatic `gh` installation.
+
+#### Root-of-Trust Bootstrap
+
+Bootstrap is deliberately out-of-band and non-circular: **a verifier cannot
+bootstrap trust in the same untrusted change that introduces or modifies it.**
+
+```text
+untrusted verifier change
+        -> human/operational review outside the executor
+        -> checkpoint commit
+        -> verifier, config, dependencies, and workflow become HEAD baseline
+        -> future commit
+        -> external CI
+        -> exact-SHA attestation
+        -> verification
+```
+
+The reference verifier rejects a HEAD commit that changes its executable,
+provider config, or target workflow relative to `HEAD^`. CI for the bootstrap
+commit may be useful smoke information, but cannot independently approve the
+trust anchor that defines that CI evidence. Bootstrap is operationally accepted
+only after external review creates the checkpoint and doctor observes the
+committed anchor and dependencies clean in HEAD. There is no `--force-trust`,
+`trust=true`, `skip-attestation`, automatic baseline, or self-approval path.
+
+#### First future high-risk cycle
+
+After that checkpoint, a future task uses the normal contract:
+
+```text
+Status: active, Risk: high
+        -> implementation
+        -> Status: verifying
+        -> required local verification
+        -> checkpoint commit ABC123 and push
+        -> GitHub Actions verifies exact ABC123
+        -> eligible trusted verifier queries CI
+        -> kind=independent, target.commit=ABC123
+        -> agent-md verify
+        -> done claim accepted
+```
+
+The agent may write the `done` claim before the final completion boundary, but
+that text does not make it valid: commit is not done, CI green is not
+automatically trusted, and an attestation for another SHA does not apply. A new
+commit or any change to the verifier, its declared dependencies, or its workflow
+invalidates the prior evidence. Binding to current state—not timestamp alone—is
+the freshness guarantee.
+
+GitHub Actions is potentially independent because execution and structured run
+state live outside the local executor and bind to a commit SHA. Its real
+strength still depends on protected credentials, workflow review, runner
+security, repository permissions, and branch policies. See the
+[provider README](examples/github-actions/README.md) for configuration,
+credentials, the exact bootstrap cycle, and supported topology.
 
 The defensive signal audit recognizes explicit path/content indicators for:
 
@@ -417,16 +577,17 @@ Signals can produce `RISK_POSSIBLY_UNDERRATED`, with signal names and paths,
 but never rewrite Risk or prove a classification. Examples are guidance, not
 an automatic safety verdict.
 
-Final evidence requirements apply only to `done`. `active`, `blocked`, and
+Final attestation requirements apply only to `done`. `active`, `blocked`, and
 `verifying` remain usable while evidence is pending. Fatal Safety controls
 always remain independent: critical Risk and valid approval cannot bypass a
 destructive-command block. Stop and `verify.sh` enforce final Risk evidence;
-pre-commit validates Risk syntax and reports signals but deliberately does not
-require final independent/human approval.
+pre-commit validates Risk syntax and trust-anchor integrity but deliberately
+does not execute or require final independent/human attestations.
 
 Doctor reports the declaration, status, observed signals, consistency, and
-whether runtime/independent/approval wiring exists. It does not run checks,
-approve work, or call a reviewer. `verify.sh` performs the full sequence:
+each verifier's path, location, integrity, executability, and eligibility. It
+does not execute attestations, approve work, or call a reviewer. `verify.sh`
+performs the full sequence:
 validate progress/Risk, run the base verification contract, apply final Risk
 requirements, execute applicable trusted evidence verifiers, and return
 non-zero for a blocking result.
@@ -481,7 +642,8 @@ blocks when it is itself changed or when relevant source changes depend
 on it; an absent progress file preserves the existing opt-out behavior.
 
 `verifying` means implementation is ready while applicable checks are still
-pending or being evaluated. `done` is a completion claim, not evidence:
+pending or being evaluated. Status: done is a completion claim, not proof of completion.
+A done claim is accepted only after all applicable state integrity, required verification, Risk, attestation, and approval requirements pass.
 Stop/pre-commit/`verify.sh` execute the current required contract freshly.
 agent-md does not persist agent-authored `pass` lines in `progress.md`, which
 would duplicate CI and could not prove that a command actually ran.
@@ -698,9 +860,14 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 - Risk signals are keyword/path/diff heuristics. They can flag possible
   underrating but cannot determine safety, intent, reversibility, or blast
   radius.
-- A committed evidence-verifier command is a trust anchor, not proof about its
-  downstream implementation. Projects remain responsible for making that
-  command validate genuine external CI/reviewer/human provenance.
+- A clean committed verifier plus its explicit trusted-file set protects only
+  the declared chain. Projects remain responsible for listing every repo-local
+  dependency and for making the anchor validate genuine external provenance.
+- External-verifier filesystem checks are intentionally shallow and portable;
+  the host remains responsible for ownership, mount integrity, package supply
+  chain, and directories above the immediate parent.
+- Strong attestation currently binds only to a clean operational HEAD. A
+  worktree fingerprint remains out of scope rather than being approximated.
 - Runtime applicability cannot be inferred generally. No configured
   runtime/smoke command produces a warning rather than false enforcement.
 - Independent evidence is conditional enforcement, not orchestration.
@@ -711,7 +878,7 @@ Use Codex skills with `$agent-md-verify` or `$visual-evidence`.
 
 ```bash
 bats tests/
-shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh .githooks/pre-commit install.sh
+shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh .githooks/pre-commit install.sh
 ```
 
 CI runs Bats, ShellCheck, JSON validation, alias-sync checks, and

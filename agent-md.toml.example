@@ -33,12 +33,12 @@
 # smoke = "./scripts/smoke.sh"
 # runtime = "./bin/my-cli --version"
 
-# Conditional evidence verifiers. They are not ordinary optional checks:
+# Conditional attestation verifiers. They are not ordinary optional checks:
 # Risk high/critical requires `independent`; Risk critical also requires
-# `approval`. To prevent self-attestation, the exact command must already be
-# present in the committed HEAD version of agent-md.toml. Each command must
-# validate its external source (CI, reviewer, signed approval, host workflow,
-# or independent harness) and communicate success by exit 0.
+# `approval`. Each value must be one direct executable path already present
+# unchanged in the committed HEAD version of agent-md.toml. Exit 0 is necessary
+# but not sufficient: stdout must be exactly one structured attestation JSON
+# object bound to the full current HEAD commit. See README.md.
 # independent = "./scripts/verify-ci-attestation.sh"
 # approval = "./scripts/verify-human-approval.sh"
 
@@ -53,6 +53,24 @@
 # Optional per-check timeout. A required timeout blocks; an optional timeout
 # warns. Requires `timeout` (or `gtimeout`) on PATH.
 # timeout_seconds = 300
+
+[verify.attestation]
+# Explicit repo-local dependency sets for each repo-local verifier. The key is
+# required when that verifier is repo-local; use [] to assert that it has no
+# repo-local dependencies beyond its implicitly checked executable. List every
+# additional repo-local file that participates in producing or validating the
+# attestation. Arrays and files must already exist unchanged in HEAD. agent-md
+# deliberately does not infer shell imports.
+# independent_files = []
+# approval_files = ["scripts/attestation-lib.sh"]
+
+# Optional external command capabilities used by an attestation verifier.
+# These are generic command names for doctor/verify diagnostics, not providers
+# or commands for the core to execute. A missing capability warns during
+# active/verifying work and blocks a final Risk guarantee that requires the
+# corresponding attestation. Capability declarations must also match HEAD.
+# independent_capabilities = ["gh"]
+# approval_capabilities = ["company-approval-cli"]
 
 [visual]
 # When true, sensory-reminder.sh becomes a BLOCKING hook.

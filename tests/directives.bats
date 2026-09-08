@@ -30,10 +30,15 @@
   [ "$status" -eq 0 ]
 }
 
-@test "directives make done evidence-backed and keep independent execution advisory" {
-  run grep -q 'Status: done.*not proof by itself' "$BATS_TEST_DIRNAME/../AGENT.md"
-  [ "$status" -eq 0 ]
+@test "directives keep independent execution advisory" {
   run grep -q 'never invokes another model automatically' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "directives define done as a claim accepted only after every applicable guarantee" {
+  run grep -q 'Status: done is a completion claim, not proof of completion' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'state integrity, required verification, Risk, attestation, and approval requirements pass' "$BATS_TEST_DIRNAME/../AGENT.md"
   [ "$status" -eq 0 ]
 }
 
@@ -53,4 +58,47 @@
   [ "$status" -eq 0 ]
   run grep -q 'bypass a fatal destructive-command' "$BATS_TEST_DIRNAME/../AGENT.md"
   [ "$status" -eq 0 ]
+}
+
+@test "directives define the four-property attestation trust model" {
+  for property in origin integrity freshness binding; do
+    run grep -qi "${property}" "$BATS_TEST_DIRNAME/../AGENT.md"
+    [ "$status" -eq 0 ]
+  done
+  run grep -q 'different check run by the executor is not independent evidence' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "directives require exact commit binding and explicit verifier dependencies" {
+  run grep -q 'target.commit.*full current HEAD' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'verify.attestation.<kind>_files' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "directives forbid circular verifier bootstrap and keep providers outside core" {
+  run grep -q 'A verifier cannot bootstrap trust in the same untrusted change' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'generic core never installs' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'verify.attestation.<kind>_capabilities' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "directives define an out-of-band Root-of-Trust Bootstrap without bypass" {
+  run grep -q 'Root-of-Trust Bootstrap' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'initial root of trust.*human.*outside the executor' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'There is no trust bypass' "$BATS_TEST_DIRNAME/../AGENT.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "shipped enforcement exposes no generic trust bypass flag" {
+  run grep -R -n -E -- '--force-trust|--skip-attestation|--auto-baseline|--auto-approve-current-head' \
+    "$BATS_TEST_DIRNAME/../.claude" \
+    "$BATS_TEST_DIRNAME/../.agent-md/bin" \
+    "$BATS_TEST_DIRNAME/../.githooks" \
+    "$BATS_TEST_DIRNAME/../install.sh"
+  [ "$status" -ne 0 ]
 }

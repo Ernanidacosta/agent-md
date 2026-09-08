@@ -1,13 +1,21 @@
 # Verification and state policy for the agent-md repository itself.
 
 [verify]
-lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh .githooks/pre-commit install.sh"
+lint = "shellcheck .claude/hooks/*.sh .codex/hooks/*.sh .agent-md/bin/*.sh examples/github-actions/*.sh .githooks/pre-commit install.sh"
 test = "bats tests/"
 smoke = "bats tests/codex-hooks.bats tests/install.bats"
+independent = "./examples/github-actions/github-actions-independent.sh"
 
 [verify.policy]
 required = ["lint", "test"]
 timeout_seconds = 300
+
+[verify.attestation]
+independent_files = [
+  "examples/github-actions/github-actions-independent.conf",
+  ".github/workflows/ci.yml",
+]
+independent_capabilities = ["gh"]
 
 [state]
 source_globs = [
@@ -15,6 +23,7 @@ source_globs = [
   ".claude/hooks/**",
   ".codex/hooks/**",
   ".githooks/**",
+  "examples/**",
   "install.sh",
   "tests/**",
 ]

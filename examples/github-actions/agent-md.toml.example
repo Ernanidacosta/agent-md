@@ -1,0 +1,12 @@
+# Merge this snippet into the project's reviewed agent-md.toml only after the
+# provider files have been committed. It is not a standalone project policy.
+
+[verify]
+independent = "./examples/github-actions/github-actions-independent.sh"
+
+[verify.attestation]
+independent_files = [
+  "examples/github-actions/github-actions-independent.conf",
+  ".github/workflows/ci.yml",
+]
+independent_capabilities = ["gh"]

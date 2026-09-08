@@ -18,6 +18,7 @@ jobs:
             .claude/hooks/*.sh \
             .codex/hooks/*.sh \
             .agent-md/bin/*.sh \
+            examples/github-actions/*.sh \
             .githooks/pre-commit \
             install.sh
 

@@ -151,17 +151,58 @@ if [ -f "$SHARED_LIB" ] && [ -f memory/progress.md ]; then
 
       for EVIDENCE_CHECK in independent approval; do
         EVIDENCE_ORIGIN=$(printf '%s' "$CONTRACT" | jq -r --arg check "$EVIDENCE_CHECK" '.checks[] | select(.name == $check) | .origin')
-        if [ "$EVIDENCE_ORIGIN" != configured ]; then
-          EVIDENCE_STATE="not configured"
-        elif risk_evidence_command_trusted "$(toml_path)" "$EVIDENCE_CHECK"; then
-          EVIDENCE_STATE="configured, trusted"
-        else
-          EVIDENCE_STATE="configured, not established in HEAD"
-        fi
+        EVIDENCE_CAPABILITIES=$(printf '%s' "$CONTRACT" | jq -r --arg check "$EVIDENCE_CHECK" \
+          '.checks[] | select(.name == $check) | .capabilities | if length == 0 then "not declared" else join(", ") end')
         if [ "$EVIDENCE_CHECK" = independent ]; then
-          printf '  independent verification: %s\n' "$EVIDENCE_STATE"
+          EVIDENCE_LABEL=Independent
+          case "$RISK_VALUE" in high|critical) EVIDENCE_REQUIRED=yes ;; *) EVIDENCE_REQUIRED=no ;; esac
         else
-          printf '  human approval: %s\n' "$EVIDENCE_STATE"
+          EVIDENCE_LABEL=Approval
+          if [ "$RISK_VALUE" = critical ]; then EVIDENCE_REQUIRED=yes; else EVIDENCE_REQUIRED=no; fi
+        fi
+        printf '%s verifier:\n' "$EVIDENCE_LABEL"
+        printf '  required by current risk: %s\n' "$EVIDENCE_REQUIRED"
+        printf '  configured: %s\n' "$(if [ "$EVIDENCE_ORIGIN" = configured ]; then printf yes; else printf no; fi)"
+        if [ "$EVIDENCE_ORIGIN" != configured ]; then
+          printf '  path: not configured\n'
+          printf '  origin: not configured\n'
+          printf '  integrity: not applicable\n'
+          printf '  executable: no\n'
+          printf '  trust: not configured\n'
+          printf '  capabilities: %s\n' "$EVIDENCE_CAPABILITIES"
+          printf '  capability status: not applicable\n'
+          continue
+        fi
+        EVIDENCE_ANCHOR=$(attestation_trust_anchor_json "$(toml_path)" "$EVIDENCE_CHECK")
+        printf '  path: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.path')"
+        printf '  origin: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.location')"
+        printf '  integrity: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.integrity')"
+        printf '  executable: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r 'if .executable then "yes" else "no" end')"
+        printf '  trust: %s\n' "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.trust')"
+        printf '  capabilities: %s\n' "$EVIDENCE_CAPABILITIES"
+        EVIDENCE_MISSING_CAPABILITIES=$(attestation_missing_capabilities "$CONTRACT" "$EVIDENCE_CHECK")
+        if [ "$EVIDENCE_CAPABILITIES" = "not declared" ]; then
+          printf '  capability status: not declared\n'
+        elif [ -n "$EVIDENCE_MISSING_CAPABILITIES" ]; then
+          printf '  capability status: unavailable\n'
+          while IFS= read -r EVIDENCE_CAPABILITY; do
+            [ -n "$EVIDENCE_CAPABILITY" ] || continue
+            printf '  dependency %s: unavailable\n' "$EVIDENCE_CAPABILITY"
+          done <<EOF
+$EVIDENCE_MISSING_CAPABILITIES
+EOF
+          warn "[WARNING VERIFY_UNAVAILABLE] $EVIDENCE_LABEL verifier dependencies are unavailable; final evidence cannot be produced."
+        else
+          printf '  capability status: available\n'
+        fi
+        if [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.eligible')" != true ]; then
+          if [ "$PROGRESS_STATUS" = "done" ] && [ "$EVIDENCE_REQUIRED" = yes ]; then
+            bad "[ERROR RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_LABEL verifier is not eligible: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason')."
+          else
+            warn "[WARNING RISK_ATTESTATION_UNTRUSTED] $EVIDENCE_LABEL verifier is not yet eligible: $(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.reason')."
+          fi
+        elif [ "$(printf '%s' "$EVIDENCE_ANCHOR" | jq -r '.location')" = external ]; then
+          warn "$EVIDENCE_LABEL verifier trust is environment-managed; agent-md does not audit host ownership or parent directories."
         fi
       done
     fi
